@@ -1,0 +1,16 @@
+# E2E test overrides — enables Dex integration with internal service URLs
+# Usage: helm install hub . -f values.yaml -f e2e-values.yaml
+
+ingress:
+  enabled: false  # enabled post-install to avoid webhook deadlock
+
+cert-manager:
+  installCRDs: false
+
+kube-prometheus-stack:
+  crds:
+    enabled: false
+
+# Use cluster-internal Dex URL (reachable from hub pods via k8s DNS)
+dex:
+  issuer: "http://dex.monitoring.svc.cluster.local:5556/dex"

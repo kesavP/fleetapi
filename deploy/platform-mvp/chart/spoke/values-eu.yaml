@@ -1,0 +1,17 @@
+# Per-spoke overrides on top of values.yaml. Everything that differs between
+# spokes lives here; shared defaults stay in values.yaml.
+authConfiguration:
+  hubIssuer:
+    # Must match the audience of the eu-token projected into the
+    # binding controllers (chart/hub-services values: spokeTokens).
+    audience: "homelab:eu-spoke"
+
+kubevirt:
+  enabled: true
+
+vmBindingControllerRBAC:
+  enabled: true
+
+metricsAgent:
+  enabled: true
+  clusterName: eu

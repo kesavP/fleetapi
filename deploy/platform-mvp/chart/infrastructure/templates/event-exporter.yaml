@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-exporter
+  namespace: monitoring
+  labels:
+    app: event-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: event-exporter
+  template:
+    metadata:
+      labels:
+        app: event-exporter
+    spec:
+      serviceAccountName: event-exporter
+      containers:
+        - name: exporter
+          image: ghcr.io/resmoio/kubernetes-event-exporter:v1.7
+          args:
+            - -conf=/etc/event-exporter/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/event-exporter
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 50m, memory: 64Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: event-exporter-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: event-exporter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    logLevel: info
+    logFormat: json
+    route:
+      routes:
+        - match:
+            - receiver: loki
+    receivers:
+      - name: loki
+        loki:
+          url: http://loki.monitoring:3100/loki/api/v1/push
+          stream:
+            job: kubernetes-events
+          layout:
+            message: "{{ "{{ .Reason }}" }} — {{ "{{ .InvolvedObject.Kind }}" }}/{{ "{{ .InvolvedObject.Name }}" }}"
+            namespace: "{{ "{{ .InvolvedObject.Namespace }}" }}"
+            involved_kind: "{{ "{{ .InvolvedObject.Kind }}" }}"
+            involved_name: "{{ "{{ .InvolvedObject.Name }}" }}"
+            reason: "{{ "{{ .Reason }}" }}"
+            type: "{{ "{{ .Type }}" }}"
+            message_text: "{{ "{{ .Message }}" }}"
+            count: "{{ "{{ .Count }}" }}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-exporter
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: event-exporter
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: event-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: event-exporter
+subjects:
+  - kind: ServiceAccount
+    name: event-exporter
+    namespace: monitoring

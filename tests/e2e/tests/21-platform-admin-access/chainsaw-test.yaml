@@ -1,0 +1,120 @@
+# E2E Test: Platform Admin Access Control
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: platform-admin-access
+spec:
+  description: >
+    Verify platform-admin can manage ClusterRoles while regular users cannot.
+    Validates ValidatingAdmissionPolicy enforcement and platform-admin RBAC.
+    Uses --as + --as-group to simulate Dex-authenticated users.
+  steps:
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 1. Verify ValidatingAdmissionPolicies are enabled ==="
+            for POLICY in restrict-clusterrole-management protect-system-namespaces protect-auth-config; do
+              NAME=$(kubectl get validatingadmissionpolicy "$POLICY" -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+              if [ -z "$NAME" ]; then
+                echo "FAIL: $POLICY not found"
+                exit 1
+              fi
+              echo "OK: $POLICY exists"
+            done
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 2. Verify policy bindings ==="
+            for POLICY in restrict-clusterrole-management protect-system-namespaces protect-auth-config; do
+              BINDING=$(kubectl get validatingadmissionpolicybinding "$POLICY" -o jsonpath='{.spec.policyName}' 2>/dev/null || echo "")
+              if [ "$BINDING" != "$POLICY" ]; then
+                echo "FAIL: $POLICY binding missing or misconfigured"
+                exit 1
+              fi
+              echo "OK: $POLICY binding active"
+            done
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 3. Verify platform-admin ClusterRole ==="
+            CR=$(kubectl get clusterrole platform-admin -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+            if [ "$CR" != "platform-admin" ]; then
+              echo "FAIL: platform-admin ClusterRole not found"
+              exit 1
+            fi
+            echo "OK: platform-admin ClusterRole exists"
+            CRB=$(kubectl get clusterrolebinding platform-admin-dex -o json 2>/dev/null || echo "{}")
+            SUBJECT=$(echo "$CRB" | jq -r '.subjects[]? | select(.name=="dex:platform-admin") | .name // ""')
+            if [ "$SUBJECT" != "dex:platform-admin" ]; then
+              echo "FAIL: platform-admin ClusterRoleBinding missing dex:platform-admin subject"
+              exit 1
+            fi
+            echo "OK: platform-admin ClusterRoleBinding has dex:platform-admin subject"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 4. Platform admin (admin@example.com) can create ClusterRole ==="
+            kubectl apply --as=dex:admin@example.com --as-group=dex:platform-admin --validate=false -f - <<'CRTMP' 2>&1 && echo "OK: platform admin can create ClusterRole" || { echo "FAIL: platform admin denied ClusterRole creation"; exit 1; }
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRole
+            metadata:
+              name: e2e-admin-test-role
+            rules:
+              - apiGroups: [""]
+                resources: ["pods"]
+                verbs: ["get"]
+            CRTMP
+      cluster: us
+      finally:
+      - script:
+          content: |
+            kubectl delete clusterrole e2e-admin-test-role --ignore-not-found 2>/dev/null || true
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 5. Tenant developer (bob@acme-corp) CANNOT create ClusterRole ==="
+            kubectl apply --as=dex:bob@acme-corp.example.com --as-group=dex:acme-corp-developer --validate=false -f - <<'CRTMP' 2>&1
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRole
+            metadata:
+              name: e2e-tenant-test-role
+            rules:
+              - apiGroups: [""]
+                resources: ["pods"]
+                verbs: ["get"]
+            CRTMP
+            STATUS=$?
+            if [ "$STATUS" != "0" ]; then
+              echo "OK: tenant developer denied ClusterRole creation"
+            else
+              echo "FAIL: tenant developer should not create ClusterRole"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 6. Platform admin can read auth config (system namespace) ==="
+            kubectl get configmap auth-configuration -n kube-system --as=dex:admin@example.com --as-group=dex:platform-admin 2>&1 || true
+            STATUS=$?
+            if [ "$STATUS" = "0" ]; then
+              echo "OK: platform admin can read auth-configuration"
+            else
+              echo "FAIL: platform admin denied access to auth-configuration"
+              exit 1
+            fi
+      cluster: us

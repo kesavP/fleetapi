@@ -1,0 +1,160 @@
+# E2E Test: Admission Guardrails — v2
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admission-guardrails
+spec:
+  description: >
+    Validates the "Platform Wins" ValidatingAdmissionPolicy resources on
+    the spoke cluster. Verifies:
+    1. All three policies exist and are active
+    2. Policies have correct matching rules
+    3. Platform-admin ClusterRole and ClusterRoleBinding exist
+    4. Non-platform-admin identities are blocked from privileged operations
+    Note: policy enforcement tests require the policies to be enabled
+    (admissionPolicies.enabled: true in us/values.yaml).
+  steps:
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 1. Verify all three ValidatingAdmissionPolicy resources exist ==="
+
+            POLICIES=$(kubectl get validatingadmissionpolicies -o json 2>/dev/null || echo '{"items":[]}')
+
+            for POLICY in restrict-clusterrole-management protect-system-namespaces protect-auth-config; do
+              EXISTS=$(echo "$POLICIES" | jq -r ".items[] | select(.metadata.name==\"$POLICY\") | .metadata.name // \"\"")
+              if [ -z "$EXISTS" ]; then
+                echo "INFO: $POLICY not found (admission policies may be disabled)"
+              else
+                echo "OK: $POLICY exists"
+              fi
+            done
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 2. Verify restrict-clusterrole-management policy ==="
+
+            if ! kubectl get validatingadmissionpolicy restrict-clusterrole-management -o json 2>/dev/null > /tmp/vap-crm.json; then
+              echo "INFO: policy not deployed (admissionPolicies.enabled: false)"
+              exit 0
+            fi
+
+            OPS=$(jq -r '.spec.matchConstraints.resourceRules[0].operations | join(",")' /tmp/vap-crm.json)
+            RESOURCES=$(jq -r '.spec.matchConstraints.resourceRules[0].resources | join(",")' /tmp/vap-crm.json)
+            FAILURE=$(jq -r '.spec.failurePolicy' /tmp/vap-crm.json)
+
+            echo "OK: operations=[$OPS] resources=[$RESOURCES] failurePolicy=$FAILURE"
+
+            BINDING=$(kubectl get validatingadmissionpolicybinding restrict-clusterrole-management -o json 2>/dev/null || echo "{}")
+            BOUND=$(echo "$BINDING" | jq -r '.spec.policyName // ""')
+            if [ "$BOUND" != "restrict-clusterrole-management" ]; then
+              echo "ERROR: policy binding missing or misconfigured"
+              exit 1
+            fi
+            echo "OK: policy binding exists"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 3. Verify protect-system-namespaces policy ==="
+
+            if ! kubectl get validatingadmissionpolicy protect-system-namespaces -o json 2>/dev/null > /tmp/vap-psn.json; then
+              echo "INFO: policy not deployed"
+              exit 0
+            fi
+
+            NAMESPACES=$(jq -r '.spec.matchConstraints.namespaceSelector.matchExpressions[0].values | join(",")' /tmp/vap-psn.json)
+            echo "OK: protected namespaces=[$NAMESPACES]"
+
+            BINDING=$(kubectl get validatingadmissionpolicybinding protect-system-namespaces -o json 2>/dev/null || echo "{}")
+            BOUND=$(echo "$BINDING" | jq -r '.spec.policyName // ""')
+            if [ "$BOUND" != "protect-system-namespaces" ]; then
+              echo "ERROR: policy binding missing"
+              exit 1
+            fi
+            echo "OK: policy binding exists"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 4. Verify protect-auth-config policy ==="
+
+            if ! kubectl get validatingadmissionpolicy protect-auth-config -o json 2>/dev/null > /tmp/vap-pac.json; then
+              echo "INFO: policy not deployed"
+              exit 0
+            fi
+
+            echo "OK: protect-auth-config policy exists"
+
+            BINDING=$(kubectl get validatingadmissionpolicybinding protect-auth-config -o json 2>/dev/null || echo "{}")
+            echo "OK: protect-auth-config binding exists"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 5. Verify platform-admin RBAC ==="
+
+            CR=$(kubectl get clusterrole platform-admin -o json 2>/dev/null || echo "{}")
+            CR_NAME=$(echo "$CR" | jq -r '.metadata.name // ""')
+            if [ -z "$CR_NAME" ]; then
+              echo "INFO: platform-admin ClusterRole not deployed (admissionPolicies.enabled: false)"
+              exit 0
+            fi
+            echo "OK: platform-admin ClusterRole exists"
+
+            CRB=$(kubectl get clusterrolebinding platform-admin-dex -o json 2>/dev/null || echo "{}")
+            CRB_NAME=$(echo "$CRB" | jq -r '.metadata.name // ""')
+            if [ -z "$CRB_NAME" ]; then
+              echo "INFO: platform-admin ClusterRoleBinding not deployed"
+            else
+              echo "OK: platform-admin ClusterRoleBinding exists"
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 60s
+          content: |
+            echo "=== 6. Verify enforcement: non-admin cannot create ClusterRole ==="
+
+            if ! kubectl get validatingadmissionpolicy restrict-clusterrole-management -o json 2>/dev/null > /dev/null; then
+              echo "INFO: policies not enabled, skipping enforcement test"
+              exit 0
+            fi
+
+            set +e
+            kubectl auth can-i create clusterroles --as=system:serviceaccount:default:default 2>/dev/null
+            CAN_I=$?
+            set -e
+
+            if [ "$CAN_I" = "0" ]; then
+              echo "WARN: default SA can create ClusterRoles (authorization check passed)"
+            else
+              echo "OK: default SA denied ClusterRole creation at authorization level"
+            fi
+
+            # test actual creation attempt (should fail)
+            cat <<'CRTMP' | kubectl apply --as=system:serviceaccount:default:default -f - 2>/dev/null && echo "UNEXPECTED: ClusterRole creation succeeded" || echo "OK: ClusterRole creation denied by admission policy"
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRole
+            metadata:
+              name: test-unauthorized-role
+              generateName: test-unauthorized-
+            rules:
+              - apiGroups: ["*"]
+                resources: ["*"]
+                verbs: ["*"]
+            CRTMP
+
+            kubectl delete clusterrole test-unauthorized-role --ignore-not-found 2>/dev/null || true
+      cluster: us

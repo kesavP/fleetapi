@@ -1,0 +1,112 @@
+# Per-tenant RBAC templates for spoke clusters.
+# Creates namespace, 3 role tiers (admin/developer/analyst), and 3 RoleBindings.
+
+{{- range .Values.tenants }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .id }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .id }}-admin
+  namespace: {{ .id }}
+rules:
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets"]
+  verbs: ["*"]
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets/status"]
+  verbs: ["*"]
+{{- if $.Values.kubevirt.enabled }}
+- apiGroups: ["kubevirt.io"]
+  resources: ["virtualmachines", "virtualmachineinstances"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["subresources.kubevirt.io"]
+  resources: ["virtualmachineinstances/console"]
+  verbs: ["get"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .id }}-developer
+  namespace: {{ .id }}
+rules:
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets/status"]
+  verbs: ["get"]
+{{- if $.Values.kubevirt.enabled }}
+- apiGroups: ["kubevirt.io"]
+  resources: ["virtualmachines", "virtualmachineinstances"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["subresources.kubevirt.io"]
+  resources: ["virtualmachineinstances/console"]
+  verbs: ["get"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .id }}-analyst
+  namespace: {{ .id }}
+rules:
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["platform.example.com"]
+  resources: ["widgets/status"]
+  verbs: ["get"]
+{{- if $.Values.kubevirt.enabled }}
+- apiGroups: ["kubevirt.io"]
+  resources: ["virtualmachines", "virtualmachineinstances"]
+  verbs: ["get", "list", "watch"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .id }}-admin-binding
+  namespace: {{ .id }}
+subjects:
+- kind: Group
+  name: dex:{{ .id }}-admin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: {{ .id }}-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .id }}-developer-binding
+  namespace: {{ .id }}
+subjects:
+- kind: Group
+  name: dex:{{ .id }}-developer
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: {{ .id }}-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .id }}-analyst-binding
+  namespace: {{ .id }}
+subjects:
+- kind: Group
+  name: dex:{{ .id }}-analyst
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: {{ .id }}-analyst
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

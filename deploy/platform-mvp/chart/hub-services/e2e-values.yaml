@@ -1,0 +1,7 @@
+# E2E test overrides for hub-services — internal Dex URL
+dex:
+  issuer: "http://dex.monitoring.svc.cluster.local:5556/dex"
+
+bindingController:
+  dex:
+    enabled: true

@@ -1,0 +1,114 @@
+{{ if .Values.admissionPolicies.enabled }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: restrict-clusterrole-management
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+    security.platform.example.com/policy: platform-wins
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["clusterroles", "clusterrolebindings"]
+  validations:
+    - expression: >
+        ('system:masters' in request.userInfo.groups)
+        || ('kubeadm:cluster-admins' in request.userInfo.groups)
+        || ('dex:platform-admin' in request.userInfo.groups)
+        || request.userInfo.username.startsWith('system:')
+      message: "Only platform-admins, system:masters, or system identities may manage ClusterRoles and ClusterRoleBindings."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: restrict-clusterrole-management
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  policyName: restrict-clusterrole-management
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: protect-system-namespaces
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+    security.platform.example.com/policy: platform-wins
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["kube-system", "kube-public", "kube-node-lease"]
+  validations:
+    - expression: >
+        ('system:masters' in request.userInfo.groups)
+        || ('kubeadm:cluster-admins' in request.userInfo.groups)
+        || ('dex:platform-admin' in request.userInfo.groups)
+        || request.userInfo.username.startsWith('system:')
+      message: "Only platform-admins, system:masters, or system identities may modify resources in this namespace."
+  {{- range .Values.admissionPolicies.additionalProtectedNamespaces }}
+    - expression: >
+        ('system:masters' in request.userInfo.groups)
+        || ('kubeadm:cluster-admins' in request.userInfo.groups)
+        || ('dex:platform-admin' in request.userInfo.groups)
+        || request.userInfo.username.startsWith('system:')
+      message: "Only platform-admins, system:masters, or system identities may modify resources in this namespace."
+  {{- end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: protect-system-namespaces
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  policyName: protect-system-namespaces
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: protect-auth-config
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+    security.platform.example.com/policy: platform-wins
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apiserver.config.k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["authenticationconfigurations"]
+  validations:
+    - expression: >
+        ('system:masters' in request.userInfo.groups)
+        || ('kubeadm:cluster-admins' in request.userInfo.groups)
+        || ('dex:platform-admin' in request.userInfo.groups)
+        || request.userInfo.username.startsWith('system:')
+      message: "Only platform-admins, system:masters, or system identities may modify AuthenticationConfiguration."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: protect-auth-config
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  policyName: protect-auth-config
+  validationActions: [Deny]
+{{ end }}

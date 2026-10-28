@@ -1,0 +1,11 @@
+FROM golang:1.24-alpine AS builder
+ENV GOTOOLCHAIN=auto
+RUN GOBIN=/usr/local/bin go install github.com/kyverno/chainsaw@latest
+
+FROM alpine:3.21
+RUN apk add --no-cache curl jq bash coreutils sed kubectl
+COPY --from=builder /usr/local/bin/chainsaw /usr/local/bin/chainsaw
+COPY deploy/platform-mvp/observability/runner.sh /runner.sh
+COPY tests/e2e/tests/ /tests-bundled/
+RUN chmod +x /runner.sh
+ENTRYPOINT ["/runner.sh"]

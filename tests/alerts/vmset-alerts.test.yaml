@@ -1,0 +1,359 @@
+# promtool unit tests for the VmSet, spoke API probe and spoke pod/node alerts. Run with `make test-alerts`, which
+# renders the hub-services chart and tests the rules it actually produces.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # Pending for longer than the grace period fires; a Ready region beside it does not.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_region_phase{phase="Pending",region="us",tenant="acme-corp",vmset="web"}'
+        values: '1x15'
+      - series: 'vmset_region_phase{phase="Ready",region="us",tenant="acme-corp",vmset="web"}'
+        values: '0x15'
+      - series: 'vmset_region_phase{phase="Pending",region="eu",tenant="acme-corp",vmset="web"}'
+        values: '0x15'
+      - series: 'vmset_region_phase{phase="Ready",region="eu",tenant="acme-corp",vmset="web"}'
+        values: '1x15'
+      - series: 'vmset_replicas{tenant="acme-corp",vmset="web"}'
+        values: '2x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: VmSetNotReady
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VmSetNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              phase: Pending
+              region: us
+              tenant: acme-corp
+              vmset: web
+            exp_annotations:
+              summary: "VmSet web is not ready in us"
+              description: "acme-corp/web has stayed Pending in us past the grace period."
+      - eval_time: 12m
+        alertname: VmSetNotReporting
+        exp_alerts: []
+
+  # A normal boot (Pending briefly, then Ready) never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_region_phase{phase="Pending",region="eu",tenant="acme-corp",vmset="web"}'
+        values: '1 1 1 1 1 0x15'
+      - series: 'vmset_region_phase{phase="Ready",region="eu",tenant="acme-corp",vmset="web"}'
+        values: '0 0 0 0 0 1x15'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VmSetNotReady
+        exp_alerts: []
+
+  # Unschedulable fires after its short grace period.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_region_phase{phase="Unschedulable",region="asia",tenant="acme-corp",vmset="db"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: VmSetUnschedulable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: VmSetUnschedulable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              phase: Unschedulable
+              region: asia
+              tenant: acme-corp
+              vmset: db
+            exp_annotations:
+              summary: "VmSet db cannot be placed in asia"
+              description: "No VM-capable cluster serves asia for acme-corp/db."
+
+  # A VmSet with replicas but no regional status means nothing is reporting;
+  # one that does report is left alone.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_replicas{tenant="acme-corp",vmset="fresh"}'
+        values: '1x15'
+      - series: 'vmset_replicas{tenant="acme-corp",vmset="web"}'
+        values: '2x15'
+      - series: 'vmset_region_phase{phase="Ready",region="eu",tenant="acme-corp",vmset="web"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: VmSetNotReporting
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VmSetNotReporting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tenant: acme-corp
+              vmset: fresh
+            exp_annotations:
+              summary: "VmSet fresh has no status"
+              description: "acme-corp/fresh has no regional status; check the vm-binding-controller and its Kro RGD."
+
+  # Pods that are not Running alert after the grace period; a clean region does not.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_region_pods_not_running{region="eu",tenant="acme-corp",vmset="web"}'
+        values: '1x15'
+      - series: 'vmset_region_pods_not_running{region="us",tenant="acme-corp",vmset="web"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: VmSetPodsNotRunning
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: VmSetPodsNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              region: eu
+              tenant: acme-corp
+              vmset: web
+            exp_annotations:
+              summary: "VM pods of web are not running in eu"
+              description: "1 VM pod(s) of acme-corp/web in eu are not in phase Running."
+
+  # Repeated restarts alert; a single restart does not.
+  - interval: 1m
+    input_series:
+      - series: 'vmset_region_pod_restarts{region="eu",tenant="acme-corp",vmset="web"}'
+        values: '0 0 0 1 2 3 3 3 3 3 3 3'
+      - series: 'vmset_region_pod_restarts{region="us",tenant="acme-corp",vmset="web"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: VmSetPodRestarting
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: VmSetPodRestarting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              region: eu
+              tenant: acme-corp
+              vmset: web
+            exp_annotations:
+              summary: "VM pods of web keep restarting in eu"
+              description: "acme-corp/web in eu reached the pod restart threshold within the alert window."
+
+  # --- spoke API probes ---
+
+  # A failing probe alerts after its short grace period; a healthy cluster beside it does not.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{check="spoke-api",cluster="us",instance="https://us-control-plane:6443/livez"}'
+        values: '0x10'
+      - series: 'probe_success{check="spoke-api",cluster="eu",instance="https://eu-control-plane:6443/livez"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: SpokeAPIUnreachable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: SpokeAPIUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              check: spoke-api
+              cluster: us
+              instance: "https://us-control-plane:6443/livez"
+            exp_annotations:
+              summary: "API server of cluster us is unreachable from the hub"
+              description: "The probe of https://us-control-plane:6443/livez has failed; the hub cannot reach, or get a valid answer from, cluster us."
+
+  # Slow answers alert after the grace period; fast ones never do.
+  - interval: 1m
+    input_series:
+      - series: 'probe_duration_seconds{check="spoke-api",cluster="us",instance="https://us-control-plane:6443/livez"}'
+        values: '2x20'
+      - series: 'probe_duration_seconds{check="spoke-api",cluster="eu",instance="https://eu-control-plane:6443/livez"}'
+        values: '0.05x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: SpokeAPISlow
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SpokeAPISlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              check: spoke-api
+              cluster: us
+              instance: "https://us-control-plane:6443/livez"
+            exp_annotations:
+              summary: "API server of cluster us answers slowly"
+              description: "Probing https://us-control-plane:6443/livez takes 2s."
+
+  # Certificate expiry: 40 days left is fine, 9 days warns, and 2 days is critical.
+  - interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{check="spoke-api",cluster="eu",instance="https://eu-control-plane:6443/livez"}'
+        values: '3456000x120'
+      - series: 'probe_ssl_earliest_cert_expiry{check="spoke-api",cluster="us",instance="https://us-control-plane:6443/livez"}'
+        values: '864000x120'
+      - series: 'probe_ssl_earliest_cert_expiry{check="spoke-api",cluster="asia",instance="https://asia-control-plane:6443/livez"}'
+        values: '172800x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SpokeAPICertificateExpiring
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: SpokeAPICertificateExpiring
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              check: spoke-api
+              cluster: us
+              instance: "https://us-control-plane:6443/livez"
+            exp_annotations:
+              summary: "API server certificate of cluster us expires soon"
+              description: "The certificate served at https://us-control-plane:6443/livez expires in 9d 22h 30m 0s."
+          - exp_labels:
+              severity: warning
+              check: spoke-api
+              cluster: asia
+              instance: "https://asia-control-plane:6443/livez"
+            exp_annotations:
+              summary: "API server certificate of cluster asia expires soon"
+              description: "The certificate served at https://asia-control-plane:6443/livez expires in 1d 22h 30m 0s."
+      - eval_time: 15m
+        alertname: SpokeAPICertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              check: spoke-api
+              cluster: asia
+              instance: "https://asia-control-plane:6443/livez"
+            exp_annotations:
+              summary: "API server certificate of cluster asia expires within days"
+              description: "The certificate served at https://asia-control-plane:6443/livez expires in 1d 23h 45m 0s."
+
+  # A cluster with no probe results at all alerts, so a dead exporter is not mistaken for health.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{check="spoke-api",cluster="eu",instance="https://eu-control-plane:6443/livez"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SpokeAPIProbeMissing
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SpokeAPIProbeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              check: spoke-api
+              cluster: us
+            exp_annotations:
+              summary: "Spoke API probe for cluster us is not reporting"
+              description: "No probe results for cluster us; check the blackbox-exporter and the spoke-api-us Probe."
+
+  # --- spoke pod and node metrics (remote-written by the spokes' agents) ---
+
+  # A crash-looping pod alerts after the grace period; a healthy pod, and a pod
+  # on the hub (no cluster label), never do.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{cluster="us",namespace="acme-corp",pod="virt-launcher-web-us-0",container="compute",reason="CrashLoopBackOff"}'
+        values: '1x10'
+      - series: 'kube_pod_container_status_waiting_reason{cluster="us",namespace="acme-corp",pod="ok",container="c",reason="CrashLoopBackOff"}'
+        values: '0x10'
+      - series: 'kube_pod_container_status_waiting_reason{namespace="monitoring",pod="hub-pod",container="c",reason="CrashLoopBackOff"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SpokePodCrashLooping
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SpokePodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+              namespace: acme-corp
+              pod: virt-launcher-web-us-0
+              container: compute
+              reason: CrashLoopBackOff
+            exp_annotations:
+              summary: "Pod virt-launcher-web-us-0 is crash-looping on cluster us"
+              description: "Container compute of acme-corp/virt-launcher-web-us-0 on cluster us keeps crashing and being restarted."
+
+  # A pod stuck Pending alerts after its longer grace period; a Running or
+  # Succeeded pod does not.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_status_phase{cluster="eu",namespace="acme-corp",pod="stuck",phase="Pending"}'
+        values: '1x20'
+      - series: 'kube_pod_status_phase{cluster="eu",namespace="acme-corp",pod="fine",phase="Running"}'
+        values: '1x20'
+      - series: 'kube_pod_status_phase{cluster="eu",namespace="acme-corp",pod="job",phase="Succeeded"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SpokePodNotReady
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: SpokePodNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: eu
+              namespace: acme-corp
+              pod: stuck
+              phase: Pending
+            exp_annotations:
+              summary: "Pod stuck is Pending on cluster eu"
+              description: "acme-corp/stuck on cluster eu has been in phase Pending past the grace period."
+
+  # A node that is not ready is critical; a ready node is not.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_status_condition{cluster="us",node="us-worker",condition="Ready",status="true"}'
+        values: '0x10'
+      - series: 'kube_node_status_condition{cluster="us",node="us-control-plane",condition="Ready",status="true"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SpokeNodeNotReady
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SpokeNodeNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              cluster: us
+              node: us-worker
+              condition: Ready
+              status: "true"
+            exp_annotations:
+              summary: "Node us-worker is not ready on cluster us"
+              description: "Node us-worker on cluster us reports Ready=false or Unknown."
+
+  # A spoke that stops sending pod metrics alerts after the staleness window
+  # plus the grace period; a spoke that keeps sending does not.
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_info{cluster="eu",namespace="kube-system",pod="coredns"}'
+        values: '1x25'
+      - series: 'kube_pod_info{cluster="us",namespace="kube-system",pod="coredns"}'
+        values: '1x5 stale'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: SpokeMetricsMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SpokeMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+            exp_annotations:
+              summary: "No pod metrics are arriving from cluster us"
+              description: "The metrics agent on cluster us has stopped sending, or never started; check it and the hub's metrics-ingest."

@@ -1,0 +1,94 @@
+{{ if .Values.oidcVerifier.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oidc-verifier-trust-jwks
+  namespace: default
+data:
+  trust.jwks: |
+    {{- .Values.oidcVerifier.trustJWKS | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oidc-verifier
+  namespace: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc-verifier
+  namespace: default
+  labels:
+    app: oidc-verifier
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: oidc-verifier
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc-verifier
+  namespace: default
+  labels:
+    app: oidc-verifier
+spec:
+  replicas: {{ .Values.oidcVerifier.replicas }}
+  selector:
+    matchLabels:
+      app: oidc-verifier
+  template:
+    metadata:
+      labels:
+        app: oidc-verifier
+    spec:
+      serviceAccountName: oidc-verifier
+      containers:
+        - name: oidc-verifier
+          image: "{{ .Values.oidcVerifier.image.repository }}:{{ .Values.oidcVerifier.image.tag }}"
+          imagePullPolicy: {{ .Values.oidcVerifier.image.pullPolicy }}
+          args:
+            - --issuer={{ .Values.oidcVerifier.issuer }}
+            - --audience={{ .Values.oidcVerifier.audience }}
+            - --port=8080
+            {{- if .Values.oidcVerifier.insecureSkipVerify }}
+            - --insecure-skip-verify
+            {{- end }}
+            {{- if .Values.oidcVerifier.trustJWKS }}
+            - --trust-jwks=/etc/oidc/trust.jwks
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.oidcVerifier.trustJWKS }}
+            - name: trust-jwks
+              mountPath: /etc/oidc
+              readOnly: true
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.oidcVerifier.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        {{- if .Values.oidcVerifier.trustJWKS }}
+        - name: trust-jwks
+          configMap:
+            name: oidc-verifier-trust-jwks
+        {{- end }}
+{{ end }}

@@ -1,0 +1,50 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: kro-globalwidget-rgd
+spec:
+  description: "Phase 4 — Verify Kro GlobalWidget RGD creates RegionalWidgetRequest"
+  steps:
+  - try:
+    - script:
+        content: |
+          STATE=$(kubectl get resourcegraphdefinition globalwidget.platform.example.com -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+          if [ "$STATE" != "Active" ]; then
+            echo "FAIL: RGD state is '$STATE', expected 'Active'"
+            exit 1
+          fi
+          echo "PASS: RGD globalwidget.platform.example.com state=$STATE"
+        timeout: 30s
+    cluster: hub
+  - try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: GlobalWidget
+          metadata:
+            name: e2e-test-widget
+            namespace: default
+            labels:
+              platform.example.com/tenant: default
+          spec:
+            regions: [us]
+            message: "hello from e2e"
+    cluster: hub
+    finally:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          name: e2e-test-widget-us
+          namespace: default
+        cluster: us
+  - try:
+    - assert:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalWidgetRequest
+          metadata:
+            name: e2e-test-widget-us
+            namespace: default
+        timeout: 30s
+    cluster: hub

@@ -1,0 +1,93 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: globalwidget-eu
+spec:
+  cluster: hub
+  description: >
+    Phase 28 — Adding the eu region needed no code: one GlobalWidget for
+    [us, eu] yields a Ready Widget on each spoke and a per-region status on
+    the hub. Widgets are removed by the test because deleting a GlobalWidget
+    does not clean up spoke Widgets.
+  steps:
+  - name: order a widget in two regions
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: GlobalWidget
+          metadata:
+            name: gweu
+            # The widget status reconciler only maps spoke Widgets back to hub
+            # requests in the default namespace.
+            namespace: default
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [us, eu]
+            message: "two regions"
+    cleanup:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: GlobalWidget
+          name: gweu
+          namespace: default
+  - name: Widget is Ready on us
+    cluster: us
+    try:
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          metadata:
+            name: gweu-us
+            namespace: acme-corp
+          spec:
+            message: "two regions"
+          status:
+            phase: Ready
+    cleanup:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          name: gweu-us
+          namespace: acme-corp
+  - name: Widget is Ready on eu
+    cluster: eu
+    try:
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          metadata:
+            name: gweu-eu
+            namespace: acme-corp
+          spec:
+            message: "two regions"
+          status:
+            phase: Ready
+    cleanup:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          name: gweu-eu
+          namespace: acme-corp
+  - name: hub status lists both regions
+    try:
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalWidgetRequest
+          metadata:
+            name: gweu-eu
+            namespace: default
+          status:
+            regions:
+            - region: eu
+              phase: Ready

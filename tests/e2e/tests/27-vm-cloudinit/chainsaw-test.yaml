@@ -1,0 +1,52 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vm-cloudinit
+spec:
+  cluster: hub
+  description: >
+    Phase 26 — The cloud-init Secret reaches the guest: the marker the
+    user-data prints to the serial console shows up in the VM's console log.
+  steps:
+  - name: order one VM
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: ci
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+  - name: the guest ran the user-data
+    cluster: eu
+    try:
+    - assert:
+        timeout: 180s
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: ci-eu-0
+            namespace: acme-corp
+          status:
+            ready: true
+    - script:
+        timeout: 120s
+        content: |
+          POD=$(kubectl -n acme-corp get pod -l vm.kubevirt.io/name=ci-eu-0 -o name | head -1)
+          [ -n "$POD" ] || { echo "FAIL: no virt-launcher pod for ci-eu-0"; exit 1; }
+          for i in $(seq 1 40); do
+            if kubectl -n acme-corp logs "$POD" -c guest-console-log 2>/dev/null | grep -q platform-cloudinit-ok; then
+              echo "OK: cloud-init marker found in the guest serial log"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "FAIL: marker not seen in guest serial log"
+          exit 1

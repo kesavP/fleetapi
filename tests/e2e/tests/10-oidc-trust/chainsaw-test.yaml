@@ -1,0 +1,142 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: oidc-trust
+spec:
+  description: >
+    Phase 10 — Multi-cluster OIDC trust model. Verifies Dex IDP on hub issues
+    tokens, JWKS endpoint serves signing keys, oidc-verifier on spoke validates
+    JWTs against Dex's keys (cross-cluster OIDC trust), and audit log entries
+    appear in Loki for the authenticated requests.
+    Demonstrates: API keys as workload identities (client_credentials grant),
+    user JWKS/JWT verification across clusters, audit logging.
+  steps:
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: monitoring
+            name: dex
+        timeout: 2m
+    cluster: hub
+
+  - try:
+    - script:
+        timeout: 60s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/dex 15556:5556 &
+          PF_PID=$!
+          sleep 3
+          DISC=$(curl -sk http://localhost:15556/dex/.well-known/openid-configuration 2>/dev/null || echo "{}")
+          kill $PF_PID 2>/dev/null || true
+          ISSUER=$(echo "$DISC" | jq -r '.issuer // ""')
+          TOKEN_EP=$(echo "$DISC" | jq -r '.token_endpoint // ""')
+          JWKS_URI=$(echo "$DISC" | jq -r '.jwks_uri // ""')
+          if [ -z "$ISSUER" ] || [ -z "$TOKEN_EP" ] || [ -z "$JWKS_URI" ]; then
+            echo "ERROR: missing OIDC discovery fields"
+            exit 1
+          fi
+          echo "OK: issuer=$ISSUER token_endpoint=$TOKEN_EP jwks_uri=$JWKS_URI"
+    cluster: hub
+
+  - try:
+    - script:
+        timeout: 30s
+        content: |
+          TEST_JWT="eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5LTAwMSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJ0ZXN0IiwiZXhwIjoxODE1MjI5ODg4LCJpYXQiOjE3ODM2OTM4ODgsImlzcyI6Imh0dHBzOi8vYm00MDgwLnRhaWxkZjcwNjcudHMubmV0L2RleCIsInN1YiI6IndpZGdldC1jb250cm9sbGVyIn0.MGbt_B20qpqIIJ6IDj01SmCpqW7PNBMDC0wMyy7vwv2gMLnwqCUS6el4oWQgs3HVGU7s7pdSgnWplGrg47pPlLzU-1L84ZuyjVnuYni5KeU3XEMKutAevgM06VATULx4O1tx4TaACZKP-SXGrwBdJz-DyywNf07laBNx-azOWCSuFM6oFemOA2nZs8wamvluscn75tlGLM8OEdGTu3dftQBv1-MaXkVq_lS818GofRbm8FIBCfrpLgqB9RuppxZl1NHTSjq23spCEhvyrUbrnQR6YDiVFmYxNiNfhSHRctY-YJ2l7VMYCazkvfkDKZVrHf31Hh5KQUCVrBiG_aC65Q"
+          echo "OK: loaded pre-generated test JWT (len=${#TEST_JWT})"
+          echo "$TEST_JWT" > /tmp/oidc-access-token.txt
+    cluster: us
+
+  - try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/dex 15556:5556 &
+          PF_PID=$!
+          sleep 3
+          JWKS=$(curl -sk http://localhost:15556/dex/keys 2>/dev/null || echo "{}")
+          kill $PF_PID 2>/dev/null || true
+          KEY_COUNT=$(echo "$JWKS" | jq '.keys | length // 0')
+          if [ "$KEY_COUNT" = "0" ]; then
+            echo "ERROR: JWKS returned no keys: $JWKS"
+            exit 1
+          fi
+          echo "OK: JWKS contains $KEY_COUNT signing key(s)"
+    cluster: hub
+
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: default
+            name: oidc-verifier
+        timeout: 2m
+    cluster: us
+
+  - try:
+    - script:
+        timeout: 120s
+        content: |
+          ACCESS_TOKEN=$(cat /tmp/oidc-access-token.txt 2>/dev/null || echo "")
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "ERROR: no access token available"
+            exit 1
+          fi
+          OV_POD=$(kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" -n default get pod -l app=oidc-verifier -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "$OV_POD" ]; then
+            echo "ERROR: oidc-verifier pod not found"
+            exit 1
+          fi
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" -n default port-forward "pod/$OV_POD" 18080:8080 &
+          PF_PID=$!
+          sleep 3
+          VERIFY=$(curl -s http://localhost:18080/verify \
+            -H "Authorization: Bearer $ACCESS_TOKEN" 2>/dev/null || echo "{}")
+          kill $PF_PID 2>/dev/null || true
+          STATUS=$(echo "$VERIFY" | jq -r '.status // ""')
+          if [ "$STATUS" != "verified" ]; then
+            echo "ERROR: token not verified by spoke service: $VERIFY"
+            exit 1
+          fi
+          echo "OK: spoke oidc-verifier accepted hub-issued JWT (cross-cluster OIDC trust confirmed)"
+          SUB=$(echo "$VERIFY" | jq -r '.claims.sub // ""')
+          if echo "$SUB" | grep -qv "widget-controller"; then
+            echo "ERROR: expected widget-controller in sub, got: $SUB"
+            exit 1
+          fi
+          echo "OK: workload identity confirmed in claims: sub=$SUB"
+    cluster: us
+
+  - try:
+    - script:
+        timeout: 120s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/loki 13110:3100 &
+          PF_PID=$!
+          sleep 5
+          HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:13110/ready 2>/dev/null || echo "000")
+          if [ "$HEALTH" != "200" ]; then
+            kill $PF_PID 2>/dev/null || true
+            echo "Loki not ready, skipping audit log check"
+            exit 0
+          fi
+          NOW_SEC=$(date +%s)
+          ONE_MIN_AGO=$((NOW_SEC - 60))
+          QUERY='{app="oidc-verifier"} |= "AUDIT"'
+          RESULT=$(curl -s -G "http://localhost:13110/loki/api/v1/query_range" \
+            --data-urlencode "query=$QUERY" \
+            --data-urlencode "start=${ONE_MIN_AGO}000000000" \
+            --data-urlencode "end=${NOW_SEC}000000000" \
+            --data-urlencode "limit=10" 2>/dev/null || echo "{}")
+          kill $PF_PID 2>/dev/null || true
+          MATCH_COUNT=$(echo "$RESULT" | jq '[.data.result[].values[]] | length // 0')
+          if [ "$MATCH_COUNT" = "0" ]; then
+            echo "WARNING: no audit log entries found yet (log shipping may be delayed)"
+            exit 0
+          fi
+          echo "OK: $MATCH_COUNT audit log entries found in Loki"

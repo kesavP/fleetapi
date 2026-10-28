@@ -1,0 +1,205 @@
+# Hub Services — controllers that depend on infrastructure (Dex, cert-manager)
+# Release name: hub-services (or whatever you choose)
+
+dex:
+  # Dex issuer URL — must match the Dex deployment in the infrastructure chart
+  issuer: "https://bm4080.taildf7067.ts.net/dex"
+
+# Spoke clusters registered on the hub. Each needs a <name>-kubeconfig Secret
+# (server + CA) and a projected <name>-token in the controllers that engage it
+# (see spokeTokens). Labels let a controller engage only the clusters it serves.
+fleet:
+  # apiURL is the address the hub reaches the spoke API at; it defaults to
+  # https://<name>-control-plane:6443, the kind address the controllers use.
+  # Spoke API probes (spokeProbes below) check it.
+  clusters:
+    - name: us
+      displayName: "US Cluster"
+    - name: eu
+      displayName: "EU Cluster"
+      labels:
+        platform.example.com/offers-vms: "true"
+
+# VmSet service (VM tiers). Tier names become the allowed `size` values.
+vmSet:
+  tiers:
+    S: { cpu: 1, memory: 1Gi }
+    M: { cpu: 2, memory: 2Gi }
+  defaultSize: S
+  maxReplicas: 3
+  image: quay.io/kubevirt/cirros-container-disk-demo:v1.9.1
+  guestUser: cirros
+  # Printed to the VM's serial console once cloud-init has run; used by tests.
+  cloudInitMarker: platform-cloudinit-ok
+  # Restricts sshPublicKey to key types/characters that cannot break out of the
+  # single-quoted shell line in the generated user-data.
+  sshPublicKeyPattern: "^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+( [A-Za-z0-9@._-]+)?$"
+
+# Places VmSet requests on VM-capable spokes as KubeVirt VMs.
+vmBindingController:
+  enabled: true
+  replicas: 1
+  image:
+    repository: sojoner/vm-binding-controller
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the distroless `nonroot` user; kubelet cannot verify the name.
+  runAsUser: 65532
+  # Only ClusterProfiles carrying these labels are engaged (see fleet.clusters).
+  clusterSelector: "platform.example.com/offers-vms=true"
+  runStrategy: Always
+  requeueInterval: 30s
+  pollInterval: 10s
+  defaultNamespace: default
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  # One projected token per VM-capable spoke; path must be <clusterName>-token.
+  spokeTokens:
+    - serviceAccountToken:
+        path: eu-token
+        audience: homelab:eu-spoke
+        expirationSeconds: 3600
+
+# HTTP API in front of VmSet. Callers send their own bearer token, which is
+# forwarded to the hub API server, so RBAC on vmsets stays the only access
+# control. Off by default until the image is built.
+vmSetGateway:
+  enabled: false
+  replicas: 2
+  image:
+    repository: sojoner/vmset-gateway
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the distroless `nonroot` user.
+  runAsUser: 65532
+  # Plural resource name Kro generated for VmSet; confirm with
+  # `kubectl api-resources | grep platform.example.com`.
+  resource: vmsets
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+# Webhook receiver for Alertmanager. On by default because Alertmanager (see
+# the infrastructure chart) always sends to it; the image must be built and
+# pushed first (`make build-alert-router-image push-alert-router`).
+alertRouter:
+  enabled: true
+  image:
+    repository: sojoner/alert-router
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the distroless `nonroot` user.
+  runAsUser: 65532
+  # An unchanged firing alert is not forwarded again within this interval.
+  # Resolutions always pass, and an alert that fires again after resolving
+  # notifies again.
+  dedupeInterval: 10m
+  sinkTimeout: 5s
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+
+# Receives the spokes' pod metrics. Each spoke runs a Prometheus agent that
+# remote-writes here; this proxy is the only way in, so the hub Prometheus is
+# never exposed. Basic auth with a generated credential (kept on upgrades);
+# copy it to each spoke with `make spoke-metrics-credentials`.
+# Traffic is plain HTTP, which is only acceptable on the lab's private Docker
+# network: terminate TLS in front of it anywhere else.
+metricsIngest:
+  enabled: true
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.27-alpine
+    pullPolicy: IfNotPresent
+  # Numeric UID of the image's non-root user.
+  runAsUser: 101
+  username: spoke-metrics
+  # Where spokes reach the proxy: a NodePort on the hub node.
+  nodePort: 30909
+  # The hub Prometheus service; its name follows the kube-prometheus-stack
+  # release name, so check it against `kubectl -n monitoring get svc`.
+  upstream: http://hub-kube-prometheus-stack-prometheus.monitoring.svc:9090
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+
+# Alerts on the pod and node metrics the spokes' agents send to the hub (see
+# metricsIngest). Series from a spoke carry a `cluster` label; the hub's own
+# do not, which is how these rules leave the hub's pods out.
+spokeMetrics:
+  crashLoopFor: 5m
+  notReadyFor: 15m
+  nodeNotReadyFor: 5m
+  # A spoke whose agent stops sending leaves nothing to alert on, so absence
+  # is itself an alert. It must outlast Prometheus's 5m staleness window.
+  missingFor: 10m
+
+# Reachability probes of each spoke's API server, from the hub: is it up, how
+# fast does it answer, and when does its certificate expire. A blackbox
+# exporter does the probing; one Probe per fleet cluster feeds Prometheus.
+# The probe sends no credentials, so a 401 or 403 still counts as reachable.
+spokeProbes:
+  enabled: true
+  image:
+    repository: prom/blackbox-exporter
+    tag: v0.25.0
+    pullPolicy: IfNotPresent
+  # Numeric UID of the exporter image's `nobody` user.
+  runAsUser: 65534
+  path: /livez
+  interval: 30s
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+  # Alert thresholds.
+  unreachableFor: 2m
+  slowSeconds: 1
+  slowFor: 10m
+  certWarnDays: 14
+  certWarnFor: 1h
+  certCriticalDays: 3
+  certCriticalFor: 10m
+  missingFor: 5m
+
+# PrometheusRule on the vmset_* metrics. Needs kube-state-metrics custom
+# resource state (infrastructure chart) to produce them. Firing alerts go to
+# Alertmanager and on to the alert-router (see alertRouter below).
+vmSetAlerts:
+  enabled: true
+  pendingFor: 10m
+  unschedulableFor: 2m
+  notReportingFor: 10m
+  podsNotRunningFor: 10m
+  # Restarts are a running total, so alert on how many happen within the window.
+  podRestartWindow: 15m
+  podRestartThreshold: 3
+
+bindingController:
+  replicas: 1
+  metricsPort: 8080
+  image:
+    repository: sojoner/binding-controller
+    tag: dev
+    pullPolicy: Always
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  dex:
+    enabled: true
+    clientID: us-spoke-controller
+    secretName: binding-controller-dex
+    secretKey: client-secret
+    pluginImage:
+      repository: sojoner/dex-auth-plugin
+      tag: dev
+      pullPolicy: Always
+  spokeTokens:
+    - serviceAccountToken:
+        path: us-token
+        audience: homelab:us-spoke
+        expirationSeconds: 3600
+    - serviceAccountToken:
+        path: eu-token
+        audience: homelab:eu-spoke
+        expirationSeconds: 3600

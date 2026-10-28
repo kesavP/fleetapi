@@ -1,0 +1,51 @@
+# Build artifact dirs
+bin/
+out/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+
+# Docs & plans (not needed for builds)
+docs/
+.claude/
+*.md
+
+# Test artifacts
+tests/
+!tests/e2e/tests/
+*.test
+*.out
+coverage*.out
+
+# CI / deploy artifacts (not needed for Go builds)
+deploy/
+!deploy/platform-mvp/observability/
+*.kubeconfig
+hack/
+
+# Helm chart tarballs
+*.tgz
+
+# Keys & secrets
+*.pem
+*.key
+*.pub
+*.jwks
+*.jwt
+*.p12
+*.pfx
+
+# OS cruft
+.DS_Store
+.env
+.env.local
+
+# Generated chainsaw reports
+chainsaw-report.json

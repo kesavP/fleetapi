@@ -1,0 +1,78 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-namespace-isolation
+spec:
+  description: "Phase 13 — Verify Widget is created in the correct tenant namespace and metrics carry real tenant_id labels"
+  steps:
+  - try:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" create namespace acme-corp --dry-run=client -o yaml | kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" apply -f -
+          echo "PASS: acme-corp namespace created"
+    cluster: us
+  - try:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" apply --validate=false -f - <<'RWR'
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalWidgetRequest
+          metadata:
+            name: e2e-test-tenant-acme-us
+            namespace: default
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            region: us
+            message: "tenant isolation e2e test"
+          RWR
+          echo "PASS: RegionalWidgetRequest created with tenant.id=acme-corp"
+    cluster: hub
+    finally:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" delete regionalwidgetrequest e2e-test-tenant-acme-us -n default 2>/dev/null || true
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" delete widget e2e-test-tenant-acme-us -n acme-corp 2>/dev/null || true
+  - try:
+    - script:
+        content: |
+          for i in $(seq 1 30); do
+            NS=$(kubectl get widget e2e-test-tenant-acme-us -n acme-corp -o jsonpath='{.metadata.namespace}' 2>/dev/null || echo "")
+            if [ "$NS" = "acme-corp" ]; then
+              echo "PASS: Widget created in acme-corp namespace"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: Widget not found in acme-corp namespace"
+          exit 1
+    cluster: us
+  - try:
+    - script:
+        content: |
+          for i in $(seq 1 30); do
+            PHASE=$(kubectl get widget e2e-test-tenant-acme-us -n acme-corp -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [ "$PHASE" = "Ready" ]; then
+              echo "PASS: Widget Ready in acme-corp"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: Widget not Ready in acme-corp"
+          exit 1
+    cluster: us
+  - try:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n default port-forward svc/binding-controller 18090:8080 &
+          PF_PID=$!
+          sleep 3
+          METRICS=$(curl -s http://localhost:18090/metrics || echo "")
+          kill $PF_PID 2>/dev/null || true
+          if echo "$METRICS" | grep -q 'tenant_id="acme-corp"'; then
+            echo "PASS: binding_controller_reconcile_total has real tenant_id=acme-corp"
+          else
+            echo "FAIL: binding_controller_reconcile_total missing tenant_id=acme-corp label"
+            exit 1
+          fi
+    cluster: hub

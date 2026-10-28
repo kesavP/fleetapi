@@ -1,0 +1,77 @@
+{{- if .Values.vmSetGateway.enabled }}
+# The gateway forwards each caller's own bearer token to the hub API server,
+# so this ServiceAccount is deliberately bound to nothing: it exists only so
+# in-cluster config can find the hub address and CA. Authorization is the
+# caller's RBAC on vmsets, not anything granted here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmset-gateway
+  namespace: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmset-gateway
+  namespace: default
+  labels:
+    app: vmset-gateway
+spec:
+  selector:
+    app: vmset-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmset-gateway
+  namespace: default
+  labels:
+    app: vmset-gateway
+spec:
+  replicas: {{ .Values.vmSetGateway.replicas }}
+  selector:
+    matchLabels:
+      app: vmset-gateway
+  template:
+    metadata:
+      labels:
+        app: vmset-gateway
+    spec:
+      serviceAccountName: vmset-gateway
+      containers:
+        - name: vmset-gateway
+          image: "{{ .Values.vmSetGateway.image.repository }}:{{ .Values.vmSetGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.vmSetGateway.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --vmset-resource={{ .Values.vmSetGateway.resource }}
+            # Create-time limits mirror the VmSet schema (see vmSet.* values).
+            - --sizes={{ keys .Values.vmSet.tiers | sortAlpha | join "," }}
+            - --default-size={{ .Values.vmSet.defaultSize }}
+            - --max-replicas={{ .Values.vmSet.maxReplicas }}
+            - {{ printf "--ssh-key-pattern=%s" .Values.vmSet.sshPublicKeyPattern | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.vmSetGateway.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.vmSetGateway.resources | nindent 12 }}
+{{- end }}

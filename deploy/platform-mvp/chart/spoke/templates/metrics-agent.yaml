@@ -1,0 +1,260 @@
+{{- if .Values.metricsAgent.enabled }}
+{{- $clusterName := required "metricsAgent.clusterName must be set to this cluster's name in the hub's fleet.clusters" .Values.metricsAgent.clusterName }}
+# Pod and node metrics for the hub. kube-state-metrics reports pod state, the
+# agent also scrapes each kubelet's cAdvisor endpoint for pod CPU and memory,
+# keeps only the series the hub's alerts and dashboards use, labels all of it
+# with this cluster's name, and remote-writes to the hub's metrics-ingest.
+# Everything runs in `default`, like the other spoke components.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: default
+automountServiceAccountToken: true
+---
+# Only what the two resources below need; kube-state-metrics is started with
+# --resources=pods,nodes so it asks for nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: default
+  labels:
+    app: kube-state-metrics
+spec:
+  selector:
+    app: kube-state-metrics
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: default
+  labels:
+    app: kube-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: "{{ .Values.metricsAgent.kubeStateMetrics.image.repository }}:{{ .Values.metricsAgent.kubeStateMetrics.image.tag }}"
+          imagePullPolicy: {{ .Values.metricsAgent.kubeStateMetrics.image.pullPolicy }}
+          args:
+            - --port=8080
+            - --resources=pods,nodes
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: telemetry
+              containerPort: 8081
+          # Readiness is served on the telemetry port, not the metrics port.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: telemetry
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.metricsAgent.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.metricsAgent.kubeStateMetrics.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metrics-agent
+  namespace: default
+automountServiceAccountToken: true
+---
+# Reading the kubelet's metrics endpoint is the nodes/metrics subresource;
+# service discovery needs to list nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-agent
+subjects:
+  - kind: ServiceAccount
+    name: metrics-agent
+    namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-agent
+  namespace: default
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.metricsAgent.scrapeInterval }}
+      external_labels:
+        cluster: {{ $clusterName | quote }}
+    scrape_configs:
+      # Pod and node state. The allow-list keeps what the hub's alerts use and
+      # drops the rest, so cardinality stays bounded as the spoke grows.
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["kube-state-metrics.default.svc:8080"]
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: kube_pod_info|kube_pod_status_phase|kube_pod_status_ready|kube_pod_container_status_(restarts_total|waiting_reason|terminated_reason|ready|running)|kube_pod_container_resource_(requests|limits)|kube_node_info|kube_node_status_condition|kube_node_status_(capacity|allocatable)
+      # Pod CPU, memory and network from each kubelet. Series without a pod
+      # label are cgroup aggregates, not pods, and are dropped. Kubelet serving
+      # certificates are usually self-signed, so the connection is encrypted
+      # and authenticated by the agent's token but the certificate is not verified.
+      - job_name: kubelet-cadvisor
+        scheme: https
+        metrics_path: /metrics/cadvisor
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_network_(receive|transmit)_bytes_total|container_oom_events_total
+          - source_labels: [pod]
+            action: drop
+            regex: ""
+    remote_write:
+      - url: {{ .Values.metricsAgent.remoteWriteURL | quote }}
+        basic_auth:
+          username: {{ .Values.metricsAgent.username | quote }}
+          password_file: /etc/hub-metrics/password
+        metadata_config:
+          send: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-agent
+  namespace: default
+  labels:
+    app: metrics-agent
+spec:
+  # One agent per cluster: two would send every series twice.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: metrics-agent
+  template:
+    metadata:
+      labels:
+        app: metrics-agent
+      annotations:
+        # Roll the pod when the scrape config changes.
+        checksum/config: {{ .Values.metricsAgent | toJson | sha256sum }}
+    spec:
+      serviceAccountName: metrics-agent
+      volumes:
+        - name: config
+          configMap:
+            name: metrics-agent
+        - name: hub-credentials
+          secret:
+            secretName: {{ .Values.metricsAgent.credentialsSecret }}
+            items:
+              - key: password
+                path: password
+        # The write-ahead log; samples not yet sent are lost if the pod moves.
+        - name: wal
+          emptyDir: {}
+      containers:
+        - name: agent
+          image: "{{ .Values.metricsAgent.image.repository }}:{{ .Values.metricsAgent.image.tag }}"
+          imagePullPolicy: {{ .Values.metricsAgent.image.pullPolicy }}
+          args:
+            - --enable-feature=agent
+            - --config.file=/etc/agent/prometheus.yml
+            - --storage.agent.path=/data
+            - --web.listen-address=:9090
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.metricsAgent.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/agent
+              readOnly: true
+            - name: hub-credentials
+              mountPath: /etc/hub-metrics
+              readOnly: true
+            - name: wal
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.metricsAgent.resources | nindent 12 }}
+{{- end }}

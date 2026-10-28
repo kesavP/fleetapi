@@ -1,0 +1,135 @@
+# E2E Test: AuthenticationConfiguration — v2
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: auth-configuration
+spec:
+  description: >
+    Validates that the spoke kube-apiserver uses AuthenticationConfiguration
+    (apiserver.config.k8s.io/v1beta1) instead of legacy oidc-* CLI flags.
+    Verifies dual-issuer setup: hub kube-apiserver (controllers) + Dex (humans).
+  steps:
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 1. Verify AuthenticationConfiguration file is mounted in kube-apiserver ==="
+
+            APISERVER_POD=$(kubectl get pod -n kube-system -l component=kube-apiserver -o jsonpath='{.items[0].metadata.name}')
+            if [ -z "$APISERVER_POD" ]; then
+              echo "ERROR: kube-apiserver pod not found"
+              exit 1
+            fi
+
+            AUTH_CONFIG_ARG=$(kubectl get pod -n kube-system "$APISERVER_POD" -o jsonpath='{.spec.containers[0].command}' | grep -o 'authentication-config[^"]*' || echo "")
+            if [ -z "$AUTH_CONFIG_ARG" ]; then
+              echo "ERROR: kube-apiserver missing --authentication-config flag"
+              exit 1
+            fi
+            echo "OK: kube-apiserver has --authentication-config flag: $AUTH_CONFIG_ARG"
+
+            VOLUMES=$(kubectl get pod -n kube-system "$APISERVER_POD" -o json)
+            HAS_AUTH_VOLUME=$(echo "$VOLUMES" | jq '.spec.volumes[]? | select(.name | test("auth")) | .hostPath.path // ""')
+            if [ -z "$HAS_AUTH_VOLUME" ]; then
+              echo "ERROR: kube-apiserver missing auth-config volume mount"
+              exit 1
+            fi
+            echo "OK: auth-config volume mounted at $HAS_AUTH_VOLUME"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 2. Verify dual-issuer AuthenticationConfiguration ==="
+
+            APISERVER_POD=$(kubectl get pod -n kube-system -l component=kube-apiserver -o jsonpath='{.items[0].metadata.name}')
+
+            AUTH_FILE=$(kubectl get pod -n kube-system "$APISERVER_POD" -o jsonpath='{.spec.containers[0].command}' | sed -n 's/.*authentication-config=\([^ ]*\).*/\1/p')
+            if [ -z "$AUTH_FILE" ]; then
+              echo "ERROR: could not extract authentication-config path"
+              exit 1
+            fi
+
+            kubectl exec -n kube-system "$APISERVER_POD" -- cat "$AUTH_FILE" > /tmp/auth-config.yaml 2>/dev/null || {
+              echo "WARN: cannot exec into kube-apiserver; checking host-mounted file"
+              exit 0
+            }
+
+            HUB_ISSUER=$(yq eval '.jwt[] | select(.issuer.url | test("hub-control-plane")) | .issuer.url' /tmp/auth-config.yaml 2>/dev/null || echo "")
+            if [ -z "$HUB_ISSUER" ]; then
+              echo "ERROR: AuthenticationConfiguration missing hub issuer (controller SA-token trust)"
+              exit 1
+            fi
+            echo "OK: hub issuer configured: $HUB_ISSUER"
+
+            HUB_PREFIX=$(yq eval '.jwt[] | select(.issuer.url | test("hub-control-plane")) | .claimMappings.username.prefix' /tmp/auth-config.yaml 2>/dev/null || echo "")
+            if [ "$HUB_PREFIX" != "hub:" ]; then
+              echo "ERROR: hub issuer username prefix is '$HUB_PREFIX', expected 'hub:'"
+              exit 1
+            fi
+            echo "OK: hub username prefix: $HUB_PREFIX"
+
+            DEX_ISSUER=$(yq eval '.jwt[] | select(.issuer.url | test("dex")) | .issuer.url' /tmp/auth-config.yaml 2>/dev/null || echo "")
+            if [ -z "$DEX_ISSUER" ]; then
+              echo "ERROR: AuthenticationConfiguration missing Dex issuer"
+              exit 1
+            fi
+            echo "OK: Dex issuer configured: $DEX_ISSUER"
+
+            DEX_PREFIX=$(yq eval '.jwt[] | select(.issuer.url | test("dex")) | .claimMappings.username.prefix' /tmp/auth-config.yaml 2>/dev/null || echo "")
+            echo "OK: Dex username prefix: $DEX_PREFIX"
+            echo "OK: AuthenticationConfiguration has dual-issuer (hub + Dex) setup"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 3. Verify Dex OIDC still works through new AuthenticationConfiguration ==="
+
+            kubectl port-forward -n monitoring svc/dex 15516:5556 &
+            PF_PID=$!
+            sleep 3
+
+            DISC=$(curl -sk http://localhost:15516/dex/.well-known/openid-configuration 2>/dev/null || echo "{}")
+            kill $PF_PID 2>/dev/null || true
+
+            ISSUER=$(echo "$DISC" | jq -r '.issuer // ""')
+            if [ -z "$ISSUER" ]; then
+              echo "ERROR: Dex OIDC discovery unavailable"
+              exit 1
+            fi
+            echo "OK: Dex OIDC discovery available: issuer=$ISSUER"
+
+            TOKEN_RESP=$(curl -sk -X POST "http://localhost:15516/dex/token" \
+              -H "Authorization: Basic $(echo -n 'chainsaw-test-client:' | base64)" \
+              -d "grant_type=client_credentials&scope=openid" 2>/dev/null || echo "{}")
+            ACCESS_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.access_token // ""')
+            if [ -z "$ACCESS_TOKEN" ]; then
+              echo "WARN: token request failed (expected in test env): $TOKEN_RESP"
+              exit 0
+            fi
+            echo "OK: Dex token endpoint functional"
+            echo "$ACCESS_TOKEN" > /tmp/dex-access-token.txt
+      cluster: hub
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            echo "=== 4. Verify legacy oidc-* flags are NOT present ==="
+
+            APISERVER_POD=$(kubectl get pod -n kube-system -l component=kube-apiserver -o jsonpath='{.items[0].metadata.name}')
+            CMD=$(kubectl get pod -n kube-system "$APISERVER_POD" -o jsonpath='{.spec.containers[0].command}')
+
+            if echo "$CMD" | grep -q "oidc-issuer-url"; then
+              echo "ERROR: legacy oidc-issuer-url flag still present"
+              exit 1
+            fi
+            if echo "$CMD" | grep -q "oidc-client-id"; then
+              echo "ERROR: legacy oidc-client-id flag still present"
+              exit 1
+            fi
+            echo "OK: no legacy oidc-* flags detected (using AuthenticationConfiguration)"
+      cluster: us

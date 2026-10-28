@@ -1,0 +1,57 @@
+{{- if .Values.metricsIngest.enabled }}
+# Alerts on the pod and node metrics the spokes' agents remote-write to the
+# hub. Only series from a spoke carry a `cluster` label (the hub's own do not),
+# which is how these rules leave the hub's pods out. Alerts keep that label,
+# plus namespace and pod, so a receiver can say which pod on which cluster.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spoke-metrics
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: spoke-pods
+      rules:
+        - alert: SpokePodCrashLooping
+          expr: kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff", cluster!=""} == 1
+          for: {{ .Values.spokeMetrics.crashLoopFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Pod {{ $labels.pod }} is crash-looping on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Container {{ $labels.container }} of {{ $labels.namespace }}/{{ $labels.pod }} on cluster {{ $labels.cluster }} keeps crashing and being restarted.` | quote }}
+        # Succeeded pods (finished Jobs) are deliberately left out.
+        - alert: SpokePodNotReady
+          expr: kube_pod_status_phase{phase=~"Pending|Failed|Unknown", cluster!=""} == 1
+          for: {{ .Values.spokeMetrics.notReadyFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Pod {{ $labels.pod }} is {{ $labels.phase }} on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `{{ $labels.namespace }}/{{ $labels.pod }} on cluster {{ $labels.cluster }} has been in phase {{ $labels.phase }} past the grace period.` | quote }}
+        - alert: SpokeNodeNotReady
+          expr: kube_node_status_condition{condition="Ready", status="true", cluster!=""} == 0
+          for: {{ .Values.spokeMetrics.nodeNotReadyFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: {{ `Node {{ $labels.node }} is not ready on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Node {{ $labels.node }} on cluster {{ $labels.cluster }} reports Ready=false or Unknown.` | quote }}
+{{- range .Values.fleet.clusters }}
+        # Without this, an agent that stops sending leaves nothing to alert on
+        # and looks like a healthy cluster. A spoke that never had an agent
+        # alerts too, so disable metricsIngest or drop the cluster from
+        # fleet.clusters if it is not meant to report.
+        - alert: SpokeMetricsMissing
+          expr: absent(kube_pod_info{cluster={{ .name | quote }}})
+          for: {{ $.Values.spokeMetrics.missingFor }}
+          labels:
+            severity: warning
+            cluster: {{ .name | quote }}
+          annotations:
+            summary: {{ printf "No pod metrics are arriving from cluster %s" .name | quote }}
+            description: {{ printf "The metrics agent on cluster %s has stopped sending, or never started; check it and the hub's metrics-ingest." .name | quote }}
+{{- end }}
+{{- end }}

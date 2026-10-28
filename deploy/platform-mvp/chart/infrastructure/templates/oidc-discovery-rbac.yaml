@@ -1,0 +1,19 @@
+# kubeadm's default system:service-account-issuer-discovery ClusterRoleBinding
+# only grants system:serviceaccounts — it never included cross-cluster
+# anonymous callers. The us spoke's apiserver fetches this hub's
+# /.well-known/openid-configuration and /openid/v1/jwks unauthenticated (it
+# has no identity of its own here) to validate controller SA tokens, so it
+# needs its own binding. A separate name — not the autoupdate-annotated
+# default binding — so kubeadm's RBAC reconciler doesn't revert it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oidc-discovery-unauthenticated
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:service-account-issuer-discovery
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:unauthenticated

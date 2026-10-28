@@ -1,0 +1,121 @@
+# E2E Test: Tenant RBAC Role Enforcement
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: tenant-rbac-roles
+spec:
+  description: >
+    Verify developer (CRU, no delete) and analyst (read-only) role enforcement.
+    admin has full access. Tests use --as + --as-group to simulate Dex-authenticated users.
+  steps:
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            kubectl create namespace acme-corp --dry-run=client -o yaml | kubectl apply -f -
+            echo "PASS: acme-corp namespace ready"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Developer (bob) CAN create a Widget
+            kubectl apply --as=dex:bob@acme-corp.example.com --as-group=dex:acme-corp-developer -n acme-corp --validate=false -f - <<'EOF'
+            apiVersion: platform.example.com/v1alpha1
+            kind: Widget
+            metadata:
+              name: e2e-rbac-dev-test
+            spec:
+              message: "developer created this"
+            EOF
+            if [ "$?" = "0" ]; then
+              echo "PASS: developer can create Widget"
+            else
+              echo "FAIL: developer could not create Widget"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Developer (bob) CAN read the Widget
+            kubectl get widget e2e-rbac-dev-test -n acme-corp --as=dex:bob@acme-corp.example.com --as-group=dex:acme-corp-developer -o jsonpath='{.spec.message}' 2>/dev/null
+            if [ "$?" = "0" ]; then
+              echo "PASS: developer can read Widget"
+            else
+              echo "FAIL: developer could not read Widget"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Developer (bob) CANNOT delete the Widget
+            set +e
+            kubectl delete widget e2e-rbac-dev-test -n acme-corp --as=dex:bob@acme-corp.example.com --as-group=dex:acme-corp-developer 2>&1
+            STATUS=$?
+            set -e
+            if [ "$STATUS" != "0" ]; then
+              echo "PASS: developer denied delete"
+            else
+              echo "FAIL: developer was allowed to delete Widget"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Analyst (carol) CANNOT create a Widget
+            set +e
+            kubectl apply --as=dex:carol@acme-corp.example.com --as-group=dex:acme-corp-analyst -n acme-corp --validate=false -f - <<'EOF' 2>&1
+            apiVersion: platform.example.com/v1alpha1
+            kind: Widget
+            metadata:
+              name: e2e-rbac-analyst-test
+            spec:
+              message: "analyst should not create this"
+            EOF
+            STATUS=$?
+            set -e
+            if [ "$STATUS" != "0" ]; then
+              echo "PASS: analyst denied create"
+            else
+              echo "FAIL: analyst was allowed to create Widget"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Analyst (carol) CAN read the Widget
+            kubectl get widget e2e-rbac-dev-test -n acme-corp --as=dex:carol@acme-corp.example.com --as-group=dex:acme-corp-analyst -o jsonpath='{.spec.message}' 2>/dev/null
+            if [ "$?" = "0" ]; then
+              echo "PASS: analyst can read Widget"
+            else
+              echo "FAIL: analyst could not read Widget"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Admin (alice) CAN delete the Widget
+            kubectl delete widget e2e-rbac-dev-test -n acme-corp --as=dex:alice@acme-corp.example.com --as-group=dex:acme-corp-admin 2>/dev/null
+            if [ "$?" = "0" ]; then
+              echo "PASS: admin can delete Widget"
+            else
+              echo "FAIL: admin could not delete Widget"
+              exit 1
+            fi
+      cluster: us

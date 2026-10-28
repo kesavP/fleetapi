@@ -1,0 +1,218 @@
+{{ if .Values.dex.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: {{ .Values.dex.namespace }}
+data:
+  config.yaml: |
+    issuer: {{ .Values.dex.issuer }}
+    storage:
+      type: sqlite3
+      config:
+        file: /var/dex/dex.db
+    web:
+      http: 0.0.0.0:5556
+    telemetry:
+      http: 0.0.0.0:5558
+    oauth2:
+      skipApprovalScreen: true
+      responseTypes:
+        - code
+        - token
+        - id_token
+      passwordConnector: mock
+    staticClients:
+      - id: widget-controller
+        name: Widget Controller (Workload Identity)
+        secret: widget-controller-secret-demo
+        redirectURIs:
+          - http://localhost:18000/callback
+        grantTypes:
+          - client_credentials
+      - id: chainsaw-test-client
+        name: Chainsaw OIDC Test Client
+        public: true
+        redirectURIs:
+          - http://localhost:18000/callback
+{{- range .Values.dex.infrastructureClients }}
+      - id: {{ .id }}
+        name: {{ .name }}
+        secret: {{ .secret }}
+        grantTypes:
+          - client_credentials
+{{- end }}
+{{- range .Values.dex.tenantClients }}
+      - id: {{ .id }}
+        name: {{ .name }}
+        secret: {{ .secret }}
+        grantTypes:
+          - client_credentials
+{{- end }}
+    connectors:
+      - type: mockPassword
+        id: mock
+        name: Demo Users
+        config:
+          username: "admin@example.com"
+          password: "admin"
+{{- range .Values.dex.connectors }}
+      - type: {{ .type }}
+        id: {{ .id }}
+        name: {{ .name }}
+        config:
+          {{- toYaml .config | nindent 10 }}
+{{- end }}
+    enablePasswordDB: true
+    staticPasswords:
+      - email: "admin@example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "admin"
+        userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+        groups:
+          - "platform-admin"
+      - email: "alice@acme-corp.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "alice"
+        userID: "11a11111-a111-1111-1111-111111111111"
+        groups:
+          - "acme-corp-admin"
+      - email: "bob@acme-corp.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "bob"
+        userID: "22b22222-b222-2222-2222-222222222222"
+        groups:
+          - "acme-corp-developer"
+      - email: "carol@acme-corp.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "carol"
+        userID: "33c33333-c333-3333-3333-333333333333"
+        groups:
+          - "acme-corp-analyst"
+      - email: "dave@globex-inc.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "dave"
+        userID: "44d44444-d444-4444-4444-444444444444"
+        groups:
+          - "globex-inc-admin"
+      - email: "eve@globex-inc.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "eve"
+        userID: "55e55555-e555-5555-5555-555555555555"
+        groups:
+          - "globex-inc-developer"
+      - email: "frank@globex-inc.example.com"
+        hash: "$2a$10$vNryCPOct./Dse9.B3oQKePz92BpuCbZ1GvWb1x6IpoPTCM2CxeYe"
+        username: "frank"
+        userID: "66f66666-f666-6666-6666-666666666666"
+        groups:
+          - "globex-inc-analyst"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: {{ .Values.dex.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dex
+rules:
+  - apiGroups: ["dex.coreos.com"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dex
+subjects:
+  - kind: ServiceAccount
+    name: dex
+    namespace: {{ .Values.dex.namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: {{ .Values.dex.namespace }}
+  labels:
+    app: dex
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 5556
+      targetPort: 5556
+    - name: telemetry
+      port: 5558
+      targetPort: 5558
+  selector:
+    app: dex
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: {{ .Values.dex.namespace }}
+  labels:
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      serviceAccountName: dex
+      containers:
+        - name: dex
+          image: "{{ .Values.dex.image.repository }}:{{ .Values.dex.image.tag }}"
+          imagePullPolicy: {{ .Values.dex.image.pullPolicy }}
+          command:
+            - dex
+            - serve
+            - /etc/dex/config.yaml
+          ports:
+            - name: http
+              containerPort: 5556
+            - name: telemetry
+              containerPort: 5558
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+            - name: data
+              mountPath: /var/dex
+          resources:
+            {{- toYaml .Values.dex.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /dex/.well-known/openid-configuration
+              port: 5556
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /dex/healthz
+              port: 5556
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: dex-config
+        - name: data
+          emptyDir: {}
+{{ end }}

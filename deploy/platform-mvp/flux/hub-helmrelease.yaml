@@ -1,0 +1,76 @@
+# Wave 1: CRDs (cluster-scoped, no namespace)
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: crds
+  namespace: flux-system
+spec:
+  interval: 1m
+  timeout: 5m
+  chart:
+    spec:
+      chart: ./deploy/platform-mvp/chart/crds
+      sourceRef:
+        kind: GitRepository
+        name: platform
+        namespace: flux-system
+      interval: 1m
+---
+# Wave 2: Infrastructure (depends on CRDs)
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: infrastructure
+  namespace: monitoring
+spec:
+  interval: 1m
+  timeout: 15m
+  dependsOn:
+    - name: crds
+      namespace: flux-system
+  chart:
+    spec:
+      chart: ./deploy/platform-mvp/chart/infrastructure
+      sourceRef:
+        kind: GitRepository
+        name: platform
+        namespace: flux-system
+      interval: 1m
+  values:
+    ingress:
+      enabled: true
+      host: ${ingress_host}
+    promtail:
+      enabled: false
+    dex:
+      issuer: "http://dex.monitoring.svc.cluster.local:5556/dex"
+---
+# Wave 3: Hub services (depends on infrastructure)
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: hub-services
+  namespace: default
+spec:
+  interval: 1m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure
+      namespace: monitoring
+    - name: crds
+      namespace: flux-system
+  chart:
+    spec:
+      chart: ./deploy/platform-mvp/chart/hub-services
+      sourceRef:
+        kind: GitRepository
+        name: platform
+        namespace: flux-system
+      interval: 1m
+  values:
+    dex:
+      issuer: "http://dex.monitoring.svc.cluster.local:5556/dex"
+    bindingController:
+      dex:
+        enabled: true

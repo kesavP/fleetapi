@@ -1,0 +1,116 @@
+{
+  "title": "Chainsaw Test Results",
+  "uid": "chainsaw-results",
+  "tags": ["platform-mvp", "testing"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Overall Result",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 3, "h": 2 },
+      "targets": [
+        { "expr": "sum(count_over_time({job=\"chainsaw-runner\", kind=\"summary\"} | json | result=~`pass` [3m])) OR on() vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "value": "1", "text": "ALL PASS" },
+            { "type": "value", "value": "0", "text": "FAILURES" }
+          ],
+          "noValue": "WAITING",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red" },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    },
+    {
+      "id": 2,
+      "title": "Passed",
+      "type": "stat",
+      "gridPos": { "x": 3, "y": 0, "w": 3, "h": 2 },
+      "targets": [
+        { "expr": "sum(count_over_time({job=\"chainsaw-runner\", kind=\"test_case\"} | json | status=~`passed` [3m]))", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "noValue": "-"
+        }
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    },
+    {
+      "id": 3,
+      "title": "Failed",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 3, "h": 2 },
+      "targets": [
+        { "expr": "sum(count_over_time({job=\"chainsaw-runner\", kind=\"test_case\"} | json | status=~`failed` [3m]))", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "noValue": "-"
+        }
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    },
+    {
+      "id": 4,
+      "title": "Total Cases",
+      "type": "stat",
+      "gridPos": { "x": 9, "y": 0, "w": 3, "h": 2 },
+      "targets": [
+        { "expr": "sum(count_over_time({job=\"chainsaw-runner\", kind=\"test_case\"} | json | status=~`passed|failed` [3m]))", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "noValue": "-"
+        }
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    },
+    {
+      "id": 5,
+      "title": "Test Cases",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 2, "w": 12, "h": 10 },
+      "targets": [
+        {
+          "expr": "{job=\"chainsaw-runner\", kind=\"test_case\"} | json | line_format \"status={{.status}}  name={{.test_name}}  duration={{.duration_ms}}ms  steps={{.steps}}  dir={{.base_path}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    },
+    {
+      "id": 6,
+      "title": "Test Suite Reference",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 10 },
+      "options": {
+        "content": "# Test Suite Reference\n\n| Dir | Test Name | What It Verifies |\n|-----|-----------|-----------------|\n| 01 | hub-cluster-ready | Hub cluster operational \u2014 Nodes exist |\n| 02 | us-cluster-ready | Us spoke cluster operational \u2014 Nodes exist |\n| 03 | widget-operator-healthy | CRD `widgets.platform.example.com` installed, operator Deployment Ready on us |\n| 04 | fleet-registered | Fleet `ClusterProfile` for us exists on hub |\n| 05 | kro-globalwidget | Kro RGD Active, creates RegionalWidgetRequest resources on hub |\n| 06 | binding-controller | Cross-cluster fan-out: Widget on us, status back to GlobalWidget on hub |\n| 07 | observability-stack | LGTM stack healthy \u2014 Prometheus, Grafana, Loki, Tempo Ready |\n| 08 | chainsaw-cronjob | Chainsaw runner CronJob exists in monitoring namespace |\n| 09 | ingress-log-shipping | Ingress controller, Grafana ingress, event-exporter, Loki ready |\n| 10 | oidc-trust | Multi-cluster OIDC trust \u2014 Dex tokens, JWKS, oidc-verifier |\n| 11 | rotating-trust | v2 trust model \u2014 projected SA tokens, Kubelet rotation |\n| 12 | dashboard-metrics | Grafana dashboards + Prometheus metrics from binding-controller |\n| 13 | tenant-isolation | Widgets in correct tenant namespace, metrics carry tenant_id labels |\n| 15 | dashboard-data | Grafana dashboards render actual Prometheus data |\n| 16 | auth-configuration | Spoke kube-apiserver uses AuthenticationConfiguration (dual-issuer) |\n| 17 | projected-sa-tokens | Hub-issued projected SA tokens \u2014 audience, file, issuer config |\n| 18 | admission-guardrails | Platform Wins \u2014 3 ValidatingAdmissionPolicy, non-admin blocked |\n| 19 | multi-tenant-isolation | Strict namespace isolation \u2014 no cross-visibility |\n| 20 | tenant-rbac-roles | Developer (CRU), analyst (read-only) roles, admin full access |\n| 21 | platform-admin-access | Platform-admin manages ClusterRoles, users blocked |\n\n---\n**Total: 20 test cases**  |  Updated every 2 min via CronJob",
+        "mode": "markdown"
+      },
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" }
+    }
+  ],
+  "schemaVersion": 39
+}

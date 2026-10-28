@@ -1,0 +1,14 @@
+# Shared secret Alertmanager presents to the alert-router. It is generated on
+# first install and kept on upgrades: `lookup` finds the existing Secret, so
+# the token does not change (and Alertmanager does not lose access) every time
+# the chart is rendered. Under `helm template` there is no cluster to look up,
+# so a throwaway value is rendered.
+{{- $existing := lookup "v1" "Secret" "monitoring" "alert-router-token" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alert-router-token
+  namespace: monitoring
+type: Opaque
+data:
+  token: {{ if and $existing $existing.data }}{{ index $existing.data "token" }}{{ else }}{{ randAlphaNum 40 | b64enc }}{{ end }}

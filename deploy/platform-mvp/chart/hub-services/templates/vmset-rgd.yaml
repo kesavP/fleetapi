@@ -1,0 +1,57 @@
+{{- $tiers := .Values.vmSet.tiers | toJson }}
+{{- $user := .Values.vmSet.guestUser }}
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: vmset.platform.example.com
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: VmSet
+    group: platform.example.com
+    spec:
+      regions: '[]string | minItems=1 description="Regions to provision VMs in (must offer VMs)"'
+      size: 'string | default="{{ .Values.vmSet.defaultSize }}" enum="{{ keys .Values.vmSet.tiers | sortAlpha | join "," }}" immutable=true description="VM tier"'
+      replicas: 'integer | default=1 minimum=1 maximum={{ .Values.vmSet.maxReplicas }} description="Number of VMs"'
+      sshPublicKey: 'string | required=true pattern="{{ .Values.vmSet.sshPublicKeyPattern }}" description="Public key authorised for the guest user"'
+    status:
+      regions: ${regionalVmSetRequest.map(r, r.status)}
+  resources:
+    - id: cloudInit
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "${schema.metadata.name}-cloudinit"
+          labels:
+            platform.example.com/tenant: '${schema.metadata.labels["platform.example.com/tenant"]}'
+            platform.example.com/vmset: "${schema.metadata.name}"
+        type: Opaque
+        stringData:
+          userdata: |
+            #!/bin/sh
+            H=/home/{{ $user }}
+            mkdir -p $H/.ssh
+            echo '${schema.spec.sshPublicKey}' >> $H/.ssh/authorized_keys
+            chown -R {{ $user }} $H/.ssh
+            chmod 700 $H/.ssh
+            chmod 600 $H/.ssh/authorized_keys
+            echo {{ .Values.vmSet.cloudInitMarker }} > /dev/console
+    - id: regionalVmSetRequest
+      template:
+        apiVersion: platform.example.com/v1alpha1
+        kind: RegionalVmSetRequest
+        metadata:
+          name: "${schema.metadata.name}-${region}"
+          labels:
+            platform.example.com/tenant: '${schema.metadata.labels["platform.example.com/tenant"]}'
+            platform.example.com/vmset: "${schema.metadata.name}"
+        spec:
+          region: "${region}"
+          replicas: ${schema.spec.replicas}
+          cpu: ${ {{ $tiers }}[schema.spec.size].cpu }
+          memory: ${ {{ $tiers }}[schema.spec.size].memory }
+          image: "{{ .Values.vmSet.image }}"
+          cloudInitSecretName: "${cloudInit.metadata.name}"
+      forEach:
+        - region: "${schema.spec.regions}"

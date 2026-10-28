@@ -1,0 +1,444 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chainsaw-tests
+  namespace: monitoring
+data:
+  .chainsaw.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Configuration
+    metadata:
+      name: platform-mvp
+    spec:
+      timeouts:
+        apply: 30s
+        assert: 60s
+        cleanup: 30s
+        delete: 30s
+        error: 10s
+        exec: 5m
+      failFast: true
+      parallel: 1
+      skipDelete: false
+      reportFormat: JSON
+      reportName: chainsaw-report
+      fullName: true
+      clusters:
+        hub:
+          kubeconfig: /tmp/chainsaw/kubeconfig-hub
+        us:
+          kubeconfig: /tmp/chainsaw/kubeconfig-us-internal
+  01-hub-cluster-ready.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: hub-cluster-ready
+    spec:
+      description: "Phase 1 — Verify hub cluster is operational"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Node
+            count: 1
+        cluster: hub
+  02-us-cluster-ready.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: us-cluster-ready
+    spec:
+      description: "Phase 1 — Verify us spoke cluster is operational"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Node
+            count: 2
+        cluster: us
+  04-fleet-registration.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: fleet-registered
+    spec:
+      description: "Phase 3 — Verify fleet registration"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: multicluster.x-k8s.io/v1alpha1
+              kind: ClusterProfile
+              metadata:
+                name: us
+                namespace: default
+            timeout: 30s
+        cluster: hub
+  05-kro-globalwidget.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: kro-globalwidget-rgd
+    spec:
+      description: "Phase 4 — Verify Kro GlobalWidget RGD exists and creates RegionalWidgetRequest"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: kro.run/v1alpha1
+              kind: ResourceGraphDefinition
+              metadata:
+                name: globalwidget.platform.example.com
+            timeout: 30s
+        cluster: hub
+      - try:
+        - apply:
+            resource:
+              apiVersion: platform.example.com/v1alpha1
+              kind: GlobalWidget
+              metadata:
+                name: e2e-test-widget
+                labels:
+                  platform.example.com/tenant: default
+              spec:
+                regions: [us]
+                message: "hello from e2e"
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: platform.example.com/v1alpha1
+              kind: RegionalWidgetRequest
+              metadata:
+                name: e2e-test-widget-us
+            timeout: 30s
+        cluster: hub
+  06-binding-controller.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: binding-controller-creates-spoke-resources
+    spec:
+      description: "Phase 5 — Verify binding controller creates Widget on us spoke"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: platform.example.com/v1alpha1
+              kind: Widget
+              metadata:
+                namespace: default
+                name: e2e-test-widget-us
+            timeout: 30s
+        cluster: us
+  07-observability-stack.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: observability-stack-healthy
+    spec:
+      description: "Phase 7 — Verify LGTM observability stack is deployed and healthy"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: monitoring
+                name: hub-kube-prometheus-stack-operator
+            timeout: 2m
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: StatefulSet
+              metadata:
+                namespace: monitoring
+                name: prometheus-hub-kube-prometheus-stack-prometheus
+            timeout: 3m
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: monitoring
+                name: hub-grafana
+            timeout: 2m
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: StatefulSet
+              metadata:
+                namespace: monitoring
+                name: loki
+            timeout: 2m
+        cluster: hub
+      - try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring wait --for=condition=Available deploy/hub-grafana --timeout=30s
+        cluster: hub
+      - try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring rollout status statefulset/loki --timeout=30s
+        cluster: hub
+      - try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/hub-grafana 3000:80 &
+              PF_PID=$!
+              sleep 5
+              HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health || echo "000")
+              kill $PF_PID 2>/dev/null || true
+              [ "$HEALTH" = "200" ] || exit 1
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: monitoring.coreos.com/v1
+              kind: ServiceMonitor
+              metadata:
+                namespace: monitoring
+                name: binding-controller
+        cluster: hub
+  08-chainsaw-cronjob.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: chainsaw-cronjob-running
+    spec:
+      description: "Phase 7 — Verify Chainsaw CronJob is deployed"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: batch/v1
+              kind: CronJob
+              metadata:
+                namespace: monitoring
+                name: chainsaw-runner
+            timeout: 30s
+        cluster: hub
+  09-ingress-log-shipping.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: ingress-and-log-shipping
+    spec:
+      description: "Phase 7 — Verify ingress controller, Grafana ingress, event exporter, and Loki ready"
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: monitoring
+                name: hub-ingress-nginx-controller
+            timeout: 2m
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                namespace: monitoring
+                name: grafana
+            timeout: 30s
+        cluster: hub
+      - try:
+        - script:
+            timeout: 60s
+            content: |
+              INGRESS_POD_IP=$(kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring get pod -l app.kubernetes.io/name=ingress-nginx -o jsonpath='{.items[0].status.podIP}')
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: bm4080.taildf7067.ts.net" "http://${INGRESS_POD_IP}/api/health" 2>/dev/null || echo "000")
+              echo "Grafana health via ingress: HTTP ${STATUS}"
+              [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || exit 1
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: monitoring
+                name: event-exporter
+            timeout: 2m
+        cluster: hub
+      - try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/loki 13100:3100 &
+              PF_PID=$!
+              sleep 3
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:13100/ready || echo "000")
+              kill $PF_PID 2>/dev/null || true
+              [ "$STATUS" = "200" ] || exit 1
+              echo "Loki ready and accepting pushes"
+        cluster: hub
+  10-oidc-trust.yaml: |
+    apiVersion: chainsaw.kyverno.io/v1alpha1
+    kind: Test
+    metadata:
+      name: oidc-trust
+    spec:
+      description: >
+        Phase 10 — Multi-cluster OIDC trust model. Verifies Dex IDP on hub issues
+        tokens, JWKS endpoint serves signing keys, oidc-verifier on spoke validates
+        JWTs against Dex's keys (cross-cluster OIDC trust), and audit log entries
+        appear in Loki for the authenticated requests.
+        Demonstrates: API keys as workload identities (client_credentials grant),
+        user JWKS/JWT verification across clusters, audit logging.
+      steps:
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: monitoring
+                name: dex
+            timeout: 2m
+        cluster: hub
+      - try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/dex 15556:5556 &
+              PF_PID=$!
+              sleep 3
+              DISC=$(curl -sk https://localhost:15556/dex/.well-known/openid-configuration 2>/dev/null || echo "{}")
+              kill $PF_PID 2>/dev/null || true
+              ISSUER=$(echo "$DISC" | jq -r '.issuer // ""')
+              TOKEN_EP=$(echo "$DISC" | jq -r '.token_endpoint // ""')
+              JWKS_URI=$(echo "$DISC" | jq -r '.jwks_uri // ""')
+              if [ -z "$ISSUER" ] || [ -z "$TOKEN_EP" ] || [ -z "$JWKS_URI" ]; then
+                echo "ERROR: missing OIDC discovery fields"
+                exit 1
+              fi
+              echo "OK: issuer=$ISSUER token_endpoint=$TOKEN_EP jwks_uri=$JWKS_URI"
+        cluster: hub
+      - try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/dex 15556:5556 &
+              PF_PID=$!
+              sleep 3
+              RESP=$(curl -sk -X POST https://localhost:15556/dex/token \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                -d "grant_type=client_credentials" \
+                -d "client_id=widget-controller" \
+                -d "client_secret=widget-controller-secret-demo" \
+                -d "scope=openid" 2>/dev/null || echo "{}")
+              kill $PF_PID 2>/dev/null || true
+              ACCESS_TOKEN=$(echo "$RESP" | jq -r '.access_token // ""')
+              if [ -z "$ACCESS_TOKEN" ]; then
+                echo "ERROR: no access_token in response: $RESP"
+                exit 1
+              fi
+              echo "OK: got access_token (len=${#ACCESS_TOKEN})"
+              echo "$ACCESS_TOKEN" > /tmp/oidc-access-token.txt
+        cluster: hub
+      - try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/dex 15556:5556 &
+              PF_PID=$!
+              sleep 3
+              JWKS=$(curl -sk https://localhost:15556/dex/keys 2>/dev/null || echo "{}")
+              kill $PF_PID 2>/dev/null || true
+              KEY_COUNT=$(echo "$JWKS" | jq '.keys | length // 0')
+              if [ "$KEY_COUNT" = "0" ]; then
+                echo "ERROR: JWKS returned no keys: $JWKS"
+                exit 1
+              fi
+              echo "OK: JWKS contains $KEY_COUNT signing key(s)"
+        cluster: hub
+      - try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                namespace: default
+                name: oidc-verifier
+            timeout: 2m
+        cluster: us
+      - try:
+        - script:
+            timeout: 120s
+            content: |
+              ACCESS_TOKEN=$(cat /tmp/oidc-access-token.txt 2>/dev/null || echo "")
+              if [ -z "$ACCESS_TOKEN" ]; then
+                echo "ERROR: no access token available"
+                exit 1
+              fi
+              OV_POD=$(kubectl --kubeconfig /tmp/chainsaw/kubeconfig-us-internal -n default get pod -l app=oidc-verifier -o jsonpath='{.items[0].metadata.name}')
+              if [ -z "$OV_POD" ]; then
+                echo "ERROR: oidc-verifier pod not found"
+                exit 1
+              fi
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-us-internal -n default port-forward "pod/$OV_POD" 18080:8080 &
+              PF_PID=$!
+              sleep 3
+              VERIFY=$(curl -s http://localhost:18080/verify \
+                -H "Authorization: Bearer $ACCESS_TOKEN" 2>/dev/null || echo "{}")
+              kill $PF_PID 2>/dev/null || true
+              STATUS=$(echo "$VERIFY" | jq -r '.status // ""')
+              if [ "$STATUS" != "verified" ]; then
+                echo "ERROR: token not verified by spoke service: $VERIFY"
+                exit 1
+              fi
+              echo "OK: spoke oidc-verifier accepted hub-issued JWT (cross-cluster OIDC trust confirmed)"
+              SUB=$(echo "$VERIFY" | jq -r '.claims.sub // ""')
+              if echo "$SUB" | grep -qv "widget-controller"; then
+                echo "ERROR: expected widget-controller in sub, got: $SUB"
+                exit 1
+              fi
+              echo "OK: workload identity confirmed in claims: sub=$SUB"
+        cluster: us
+      - try:
+        - script:
+            timeout: 120s
+            content: |
+              kubectl --kubeconfig /tmp/chainsaw/kubeconfig-hub -n monitoring port-forward svc/loki 13100:3100 &
+              PF_PID=$!
+              sleep 5
+              HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:13100/ready 2>/dev/null || echo "000")
+              if [ "$HEALTH" != "200" ]; then
+                kill $PF_PID 2>/dev/null || true
+                echo "Loki not ready, skipping audit log check"
+                exit 0
+              fi
+              NOW_SEC=$(date +%s)
+              ONE_MIN_AGO=$((NOW_SEC - 60))
+              QUERY='{app="oidc-verifier"} |= "AUDIT"'
+              RESULT=$(curl -s -G "http://localhost:13100/loki/api/v1/query_range" \
+                --data-urlencode "query=$QUERY" \
+                --data-urlencode "start=${ONE_MIN_AGO}000000000" \
+                --data-urlencode "end=${NOW_SEC}000000000" \
+                --data-urlencode "limit=10" 2>/dev/null || echo "{}")
+              kill $PF_PID 2>/dev/null || true
+              MATCH_COUNT=$(echo "$RESULT" | jq '[.data.result[].values[]] | length // 0')
+              if [ "$MATCH_COUNT" = "0" ]; then
+                echo "WARNING: no audit log entries found yet (log shipping may be delayed)"
+                exit 0
+              fi
+              echo "OK: $MATCH_COUNT audit log entries found in Loki"
+        cluster: hub

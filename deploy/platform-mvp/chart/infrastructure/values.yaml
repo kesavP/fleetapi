@@ -1,0 +1,397 @@
+ingress:
+  enabled: false
+  host: bm4080.taildf7067.ts.net
+
+cert-manager:
+  enabled: true
+  installCRDs: true
+
+dex:
+  enabled: true
+  namespace: monitoring
+  issuer: "https://bm4080.taildf7067.ts.net/dex"
+  image:
+    repository: ghcr.io/dexidp/dex
+    tag: v2.42.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 100m, memory: 128Mi }
+  # infrastructureClients: Dex clients for service identities. Still used by
+  # bindingController's dex-auth-plugin sidecar (chart/hub-services) — do not
+  # remove even though token-rotator (the original consumer) is gone.
+  infrastructureClients:
+    - id: us-spoke-controller
+      name: US Spoke Controller (Infrastructure)
+      secret: us-spoke-controller-secret-demo
+    - id: eu-spoke-controller
+      name: EU Spoke Controller (Infrastructure)
+      secret: eu-spoke-controller-secret-demo
+    - id: asia-spoke-controller
+      name: Asia Spoke Controller (Infrastructure)
+      secret: asia-spoke-controller-secret-demo
+  tenantClients:
+    - id: acme-corp-us-controller
+      name: ACME Corp US Controller
+      secret: acme-corp-us-secret-demo
+    - id: globex-inc-us-controller
+      name: Globex Inc US Controller
+      secret: globex-inc-us-secret-demo
+  connectors: []
+  # Example multi-IDP connectors:
+  # connectors:
+  #   - type: oidc
+  #     id: acme-corp-okta
+  #     name: ACME Corp (Okta)
+  #     config:
+  #       issuer: https://acme-corp.okta.com
+  #       clientID: ${ACME_OKTA_CLIENT_ID}
+  #       clientSecret: ${ACME_OKTA_CLIENT_SECRET}
+  #   - type: github
+  #     id: startup-x-github
+  #     name: Startup X (GitHub)
+  #     config:
+  #       clientID: ${STARTUPX_GITHUB_CLIENT_ID}
+  #       clientSecret: ${STARTUPX_GITHUB_CLIENT_SECRET}
+  #       orgs:
+  #         - startup-x
+
+cronjob:
+  schedule: "*/2 * * * *"
+
+kube-prometheus-stack:
+  enabled: true
+  crds:
+    enabled: true
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 128Mi }
+      # Mounts the token Alertmanager presents to the alert-router; the Secret
+      # is created by templates/alert-router-token.yaml. State is in an
+      # emptyDir, so silences are lost on restart (add storage for production).
+      secrets:
+        - alert-router-token
+    # Replaces the chart's default config wholesale, so the defaults worth
+    # keeping (the severity and InfoInhibitor inhibitions, the Watchdog route)
+    # are repeated here. Every other alert goes to the alert-router, which
+    # logs it; its sinks are where delivery will grow.
+    config:
+      global:
+        resolve_timeout: 5m
+      inhibit_rules:
+        - source_matchers:
+            - 'severity = critical'
+          target_matchers:
+            - 'severity =~ warning|info'
+          equal: [namespace, alertname]
+        - source_matchers:
+            - 'severity = warning'
+          target_matchers:
+            - 'severity = info'
+          equal: [namespace, alertname]
+        - source_matchers:
+            - 'alertname = InfoInhibitor'
+          target_matchers:
+            - 'severity = info'
+          equal: [namespace]
+        - target_matchers:
+            - 'alertname = InfoInhibitor'
+        # A pod that is not running is the specific cause of a region that
+        # stays Pending, so page on the cause once instead of both.
+        - source_matchers:
+            - 'alertname = VmSetPodsNotRunning'
+          target_matchers:
+            - 'alertname = VmSetNotReady'
+          equal: [tenant, vmset, region]
+        # An unreachable API server also looks slow (a timed-out probe takes
+        # longer than the threshold), and a certificate within days of expiry
+        # also satisfies the earlier warning. Page on the worse state only.
+        - source_matchers:
+            - 'alertname = SpokeAPIUnreachable'
+          target_matchers:
+            - 'alertname = SpokeAPISlow'
+          equal: [cluster]
+        - source_matchers:
+            - 'alertname = SpokeAPICertificateExpiringSoon'
+          target_matchers:
+            - 'alertname = SpokeAPICertificateExpiring'
+          equal: [cluster]
+      route:
+        group_by: [alertname, cluster, tenant, vmset, namespace]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        receiver: alert-router
+        routes:
+          - receiver: 'null'
+            matchers:
+              - alertname =~ "Watchdog|InfoInhibitor"
+      receivers:
+        - name: 'null'
+        - name: alert-router
+          webhook_configs:
+            - url: http://alert-router.monitoring.svc/alerts
+              send_resolved: true
+              http_config:
+                authorization:
+                  type: Bearer
+                  credentials_file: /etc/alertmanager/secrets/alert-router-token/token
+      templates:
+        - '/etc/alertmanager/config/*.tmpl'
+  prometheus:
+    prometheusSpec:
+      replicas: 1
+      retention: 2d
+      resources:
+        requests: { cpu: 200m, memory: 512Mi }
+        limits: { cpu: 500m, memory: 1Gi }
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      serviceMonitorSelector: {}
+      podMonitorSelector: {}
+      ruleSelector: {}
+      # Lets the spokes' metrics agents remote-write pod metrics here. It is
+      # only reachable through the authenticating proxy in hub-services
+      # (metrics-ingest.yaml), never directly.
+      enableRemoteWriteReceiver: true
+      # Probes (the spoke API checks in hub-services) are otherwise selected
+      # only when labelled for this release.
+      probeSelectorNilUsesHelmValues: false
+      probeSelector: {}
+      additionalScrapeConfigs: []
+  grafana:
+    adminPassword: admin
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 200m, memory: 256Mi }
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        searchNamespace: ALL
+    datasources:
+      datasources.yaml:
+        apiVersion: 1
+        datasources:
+          - name: Loki
+            type: loki
+            url: http://loki.monitoring:3100
+            access: proxy
+  kube-state-metrics:
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { cpu: 50m, memory: 128Mi }
+    # Exposes VmSet health as metrics (vmset_*), read from the status the
+    # controllers already write on the hub. Alerts on them live in the
+    # hub-services chart (vmset-alerts.yaml).
+    rbac:
+      extraRules:
+        - apiGroups: ["platform.example.com"]
+          resources: ["vmsets"]
+          verbs: ["list", "watch"]
+    customResourceState:
+      enabled: true
+      config:
+        kind: CustomResourceStateMetrics
+        spec:
+          resources:
+            - groupVersionKind:
+                group: platform.example.com
+                version: v1alpha1
+                kind: VmSet
+              metricNamePrefix: vmset
+              labelsFromPath:
+                vmset: [metadata, name]
+                tenant: [metadata, labels, platform.example.com/tenant]
+              metrics:
+                - name: replicas
+                  help: Replicas requested per region.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [spec, replicas]
+                # One series per region and phase: 1 for the phase the region
+                # is in, 0 for the others. A region with no status yet has no
+                # series, which vmset-alerts.yaml treats as "not reporting".
+                - name: region_phase
+                  help: Phase of the VmSet in a region (1 = current phase).
+                  each:
+                    type: StateSet
+                    stateSet:
+                      labelName: phase
+                      path: [status, regions]
+                      valueFrom: [phase]
+                      list: [Pending, Ready, Unschedulable]
+                      labelsFromPath:
+                        region: [region]
+                - name: region_ready_replicas
+                  help: Ready VMs in a region.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, regions]
+                      valueFrom: [readyReplicas]
+                      labelsFromPath:
+                        region: [region]
+                # kube-state-metrics cannot iterate the per-VM list nested
+                # inside each region, so pod health is exported as the
+                # region-level totals the controller computes. They are left
+                # out of the status when the pods could not be read, and no
+                # nilIsZero here: a missing field must stay "unknown" instead
+                # of becoming a healthy-looking 0.
+                - name: region_pod_restarts
+                  help: Container restarts across the region's VM pods.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, regions]
+                      valueFrom: [podRestarts]
+                      labelsFromPath:
+                        region: [region]
+                - name: region_pods_not_running
+                  help: VM pods in the region whose phase is not Running.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, regions]
+                      valueFrom: [podsNotRunning]
+                      labelsFromPath:
+                        region: [region]
+  nodeExporter:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { cpu: 50m, memory: 64Mi }
+  prometheusOperator:
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 100m, memory: 128Mi }
+
+loki:
+  enabled: true
+  fullnameOverride: loki
+  deploymentMode: SingleBinary
+  loki:
+    schemaConfig:
+      configs:
+        - from: "2025-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    storage:
+      type: filesystem
+      filesystem:
+        chunks_directory: /var/loki/chunks
+        rules_directory: /var/loki/rules
+    storage_config:
+      tsdb_shipper:
+        active_index_directory: /var/loki/tsdb-index
+        cache_location: /var/loki/tsdb-cache
+    limits_config:
+      max_entries_limit_per_query: 5000
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    podSecurityContext:
+      fsGroup: 0
+      runAsUser: 0
+      runAsNonRoot: false
+      runAsGroup: 0
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: false
+    extraVolumes:
+      - name: loki-tmp
+        emptyDir: {}
+      - name: loki-data
+        emptyDir: {}
+    extraVolumeMounts:
+      - name: loki-tmp
+        mountPath: /var/loki-tmp
+      - name: loki-data
+        mountPath: /var/loki
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 768Mi }
+  backend:
+    replicas: 0
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  minio:
+    enabled: false
+  gateway:
+    enabled: false
+  monitoring:
+    dashboards:
+      enabled: false
+    rules:
+      enabled: false
+    serviceMonitor:
+      enabled: false
+    selfMonitoring:
+      enabled: false
+  test:
+    enabled: false
+
+promtail:
+  enabled: true
+  containerSecurityContext:
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 256Mi }
+  config:
+    clients:
+      - url: http://loki.monitoring:3100/loki/api/v1/push
+        batchwait: 1s
+        batchsize: 1048576
+    snippets:
+      extraRelabelConfigs:
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_app, __meta_kubernetes_pod_controller_name, __meta_kubernetes_pod_name]
+          regex: '^;*([^;]+)(;.*)?$'
+          target_label: app
+    limits_config:
+      max_streams_per_user: 0
+      readline_rate_drop: false
+    positions:
+      filename: /run/promtail/positions.yaml
+  tolerations:
+    - operator: Exists
+
+ingress-nginx:
+  enabled: true
+  controller:
+    replicaCount: 1
+    ingressClassResource:
+      name: nginx
+      default: false
+    service:
+      type: ClusterIP
+    hostPort:
+      enabled: true
+      ports:
+        http: 80
+        https: 443
+    kind: Deployment
+    resources:
+      requests: { cpu: 50m, memory: 90Mi }
+      limits: { cpu: 200m, memory: 256Mi }

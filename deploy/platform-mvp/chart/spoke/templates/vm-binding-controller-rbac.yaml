@@ -1,0 +1,71 @@
+{{- if .Values.vmBindingControllerRBAC.enabled }}
+# The hub's vm-binding-controller authenticates here with a projected SA token
+# (see auth-config.yaml). It may watch VMs everywhere (the informer is
+# cluster-wide) but write VMs and Secrets only in tenant namespaces. Status
+# details (VM instances, virt-launcher pods) are read uncached, per tenant
+# namespace, so they need no cluster-wide grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hub-vm-binding-controller
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+    security.platform.example.com/identity: hub-service
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hub-vm-binding-controller
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hub-vm-binding-controller
+subjects:
+  - kind: User
+    name: {{ .Values.vmBindingControllerRBAC.hubIdentity }}
+    apiGroup: rbac.authorization.k8s.io
+{{- $namespaces := list }}
+{{- range .Values.tenants }}{{- $namespaces = append $namespaces .id }}{{- end }}
+{{- $namespaces = concat $namespaces .Values.vmBindingControllerRBAC.extraNamespaces }}
+{{- range $namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hub-vm-binding-controller
+  namespace: {{ . }}
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachineinstances"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hub-vm-binding-controller
+  namespace: {{ . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hub-vm-binding-controller
+subjects:
+  - kind: User
+    name: {{ $.Values.vmBindingControllerRBAC.hubIdentity }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

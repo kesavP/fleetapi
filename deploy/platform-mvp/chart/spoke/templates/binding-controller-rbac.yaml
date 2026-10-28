@@ -1,0 +1,31 @@
+{{ if .Values.bindingControllerRBAC.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hub-binding-controller
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+    security.platform.example.com/identity: hub-service
+rules:
+  - apiGroups: ["platform.example.com"]
+    resources: ["widgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["platform.example.com"]
+    resources: ["widgets/status"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hub-binding-controller
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hub-binding-controller
+subjects:
+  - kind: User
+    name: {{ .Values.bindingControllerRBAC.hubIdentity }}
+    apiGroup: rbac.authorization.k8s.io
+{{ end }}

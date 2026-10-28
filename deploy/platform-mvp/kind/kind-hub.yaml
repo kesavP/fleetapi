@@ -1,0 +1,24 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.1
+    kubeadmConfigPatches:
+    - |
+      kind: ClusterConfiguration
+      apiServer:
+        extraArgs:
+          # Default issuer (https://kubernetes.default.svc.cluster.local) is only
+          # resolvable from inside this cluster. Every spoke's
+          # AuthenticationConfiguration (chart/spoke/values.yaml authConfiguration.hubIssuer)
+          # trusts this exact URL to validate controller SA tokens cross-cluster —
+          # it must stay in sync with that value.
+          service-account-issuer: "https://hub-control-plane:6443"
+          service-account-jwks-uri: "https://hub-control-plane:6443/openid/v1/jwks"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

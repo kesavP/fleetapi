@@ -1,0 +1,82 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: binding-controller-status-roundtrip
+spec:
+  description: >
+    Phase 5 — Verify the binding controller creates a Widget on the us spoke
+    for a RegionalWidgetRequest, and that the Widget's status (set by the
+    widget-operator on us) propagates back through RegionalWidgetRequest.status
+    all the way to GlobalWidget.status on the hub — the actual
+    multicluster-runtime cross-cluster fan-out this MVP exists to prove.
+    Self-contained (applies its own GlobalWidget) rather than depending on
+    the 05 test's object, since chainsaw does not guarantee ordering between
+    independent Test resources.
+  steps:
+  - try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: GlobalWidget
+          metadata:
+            name: e2e-test-widget-bc
+            namespace: default
+            labels:
+              platform.example.com/tenant: default
+          spec:
+            regions: [us]
+            message: "hello from the binding-controller status-roundtrip test"
+    cluster: hub
+    finally:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: Widget
+          name: e2e-test-widget-bc-us
+          namespace: default
+        cluster: us
+  - try:
+    - script:
+        content: |
+          for i in $(seq 1 30); do
+            PHASE=$(kubectl get widget e2e-test-widget-bc-us -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [ "$PHASE" = "Ready" ]; then
+              echo "PASS: Widget Ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: Widget not Ready after 60s"
+          exit 1
+        timeout: 90s
+    cluster: us
+  - try:
+    - script:
+        content: |
+          for i in $(seq 1 30); do
+            PHASE=$(kubectl get regionalwidgetrequest e2e-test-widget-bc-us -n default -o jsonpath='{.status.regions[0].phase}' 2>/dev/null || echo "")
+            if [ "$PHASE" = "Ready" ]; then
+              echo "PASS: RegionalWidgetRequest status propagated"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: RegionalWidgetRequest status not propagated"
+          exit 1
+        timeout: 90s
+    cluster: hub
+  - try:
+    - script:
+        content: |
+          for i in $(seq 1 30); do
+            PHASE=$(kubectl get globalwidget e2e-test-widget-bc -n default -o jsonpath='{.status.regions[0].regions[0].phase}' 2>/dev/null || echo "")
+            if [ "$PHASE" = "Ready" ]; then
+              echo "PASS: GlobalWidget status propagated"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: GlobalWidget status not propagated"
+          exit 1
+        timeout: 90s
+    cluster: hub

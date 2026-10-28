@@ -1,0 +1,319 @@
+{
+  "title": "Controller Deep Dive",
+  "uid": "controller-deep-dive",
+  "tags": [
+    "platform-mvp",
+    "controller",
+    "debug"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Controller Logs",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "{namespace=\"default\"} |~ \"(?i)(regionalwidgetrequest|reconcil|spoke|created|error|widget)\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Kubernetes Events \u2014 Controller & Spoke",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 16,
+        "h": 6
+      },
+      "targets": [
+        {
+          "expr": "{job=\"kubernetes-events\"} |~ \"(?i)(widget|kro|regional|binding)\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Reconcile Throughput (by result)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "rate(controller_runtime_reconcile_total{controller=\"regionalwidgetrequest\"}[2m])",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Reconcile Latency Heatmap",
+      "type": "heatmap",
+      "gridPos": {
+        "x": 8,
+        "y": 14,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(controller_runtime_reconcile_time_seconds_bucket{controller=\"regionalwidgetrequest\"}[2m])) by (le)",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Auth Flow & Connection Architecture",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 8,
+        "h": 6
+      },
+      "options": {
+        "content": "## Multi-Cluster Auth Flow\n\n```\nHub (kind-hub)                         Spoke (kind-us)\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500                      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nKro RGD expands\n    \u2193\nRegionalWidgetRequest\n    \u2193 (watched by controller)\nController.Reconcile()\n    \u2502\n    \u251c\u25001. Read spec.region = \"us\"\n    \u2502\n    \u251c\u25002. Provider.Get(ctx, \"us\")\n    \u2502   \u2514\u2500 ClusterProfile/us lookup\n    \u2502   \u2514\u2500 Kubeconfig Secret read\n    \u2502   \u2514\u2500 rest.Config built\n    \u2502   \u2514\u2500 spokeClient created\n    \u2502\n    \u251c\u25003. ensureWidget() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2192 Widget created on spoke\n    \u2502\n    \u2514\u25004. Widget operator reconciles\n                                           \u2193\n                                    Widget.status updated on spoke\n\nAuth: Kubeconfig (X.509 client cert)\n      stored in Secret, referenced by ClusterProfile\n      No OIDC \u2014 service-to-service, not user-facing\n```",
+        "mode": "markdown"
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      }
+    },
+    {
+      "id": 6,
+      "title": "Work Queue Depth",
+      "type": "gauge",
+      "gridPos": {
+        "x": 8,
+        "y": 19,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "expr": "controller_runtime_active_workers{controller=\"regionalwidgetrequest\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Success Rate (2m)",
+      "type": "gauge",
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(controller_runtime_reconcile_total{controller=\"regionalwidgetrequest\",result=\"success\"}[2m])) / sum(rate(controller_runtime_reconcile_total{controller=\"regionalwidgetrequest\"}[2m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          }
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 10,
+      "title": "Spoke API Latency (rest_client)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 22,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(rest_client_request_duration_seconds_bucket[5m]))",
+          "refId": "A",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(rest_client_request_duration_seconds_bucket[5m]))",
+          "refId": "B",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 11,
+      "title": "Reconciles by Tenant (2m rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(binding_controller_reconcile_total[2m])) by (tenant_id)",
+          "refId": "A",
+          "legendFormat": "{{tenant_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 12,
+      "title": "Widgets by Namespace (Tenancy Separation)",
+      "type": "logs",
+      "gridPos": {
+        "x": 8,
+        "y": 27,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "{namespace=~\"default|acme-corp|startup-x\"} |= \"Widget\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      }
+    }
+  ],
+  "schemaVersion": 39
+}

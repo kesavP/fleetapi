@@ -1,0 +1,52 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vmset-unschedulable
+spec:
+  cluster: hub
+  description: >
+    Phase 27 — A region that does not offer VMs (us has no KubeVirt) is
+    reported Unschedulable instead of failing, and deleting such a VmSet is
+    not blocked by its finalizer.
+  steps:
+  - name: order VMs in a region without VM support
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: nowhere
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [us]
+            size: S
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: nowhere-us
+          status:
+            regions:
+            - region: us
+              phase: Unschedulable
+              readyReplicas: 0
+  - name: delete is not blocked
+    try:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          name: nowhere
+    - error:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: nowhere-us

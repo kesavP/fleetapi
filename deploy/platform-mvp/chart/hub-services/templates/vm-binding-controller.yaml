@@ -1,0 +1,90 @@
+{{- if .Values.vmBindingController.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vm-binding-controller
+  namespace: default
+---
+# Narrower than binding-controller: Secrets are read by name only (the
+# cloud-init Secret and ClusterProfile kubeconfigs), never listed or watched.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vm-binding-controller
+rules:
+  - apiGroups: ["platform.example.com"]
+    resources: ["regionalvmsetrequests"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["platform.example.com"]
+    resources: ["regionalvmsetrequests/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["platform.example.com"]
+    resources: ["regionalvmsetrequests/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["clusterprofiles"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vm-binding-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vm-binding-controller
+subjects:
+  - kind: ServiceAccount
+    name: vm-binding-controller
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vm-binding-controller
+  namespace: default
+  labels:
+    app: vm-binding-controller
+spec:
+  replicas: {{ .Values.vmBindingController.replicas }}
+  selector:
+    matchLabels:
+      app: vm-binding-controller
+  template:
+    metadata:
+      labels:
+        app: vm-binding-controller
+    spec:
+      serviceAccountName: vm-binding-controller
+      volumes:
+        - name: spoke-tokens
+          projected:
+            sources:
+{{ toYaml .Values.vmBindingController.spokeTokens | indent 14 }}
+      containers:
+        - name: vm-binding-controller
+          image: "{{ .Values.vmBindingController.image.repository }}:{{ .Values.vmBindingController.image.tag }}"
+          imagePullPolicy: {{ .Values.vmBindingController.image.pullPolicy }}
+          args:
+            - --cluster-selector={{ .Values.vmBindingController.clusterSelector }}
+            - --run-strategy={{ .Values.vmBindingController.runStrategy }}
+            - --requeue-interval={{ .Values.vmBindingController.requeueInterval }}
+            - --poll-interval={{ .Values.vmBindingController.pollInterval }}
+            - --default-namespace={{ .Values.vmBindingController.defaultNamespace }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.vmBindingController.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: spoke-tokens
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+          resources:
+            {{- toYaml .Values.vmBindingController.resources | nindent 12 }}
+{{- end }}

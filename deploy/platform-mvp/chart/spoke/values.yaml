@@ -1,0 +1,129 @@
+widgetOperator:
+  enabled: true
+  replicas: 1
+  readyDelay: 2s
+  image:
+    repository: sojoner/widget-operator
+    tag: dev
+    pullPolicy: Always
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+authConfiguration:
+  enabled: true
+  hubIssuer:
+    enabled: true
+    url: "https://hub-control-plane:6443"
+    audience: "homelab:us-spoke"
+    claimValidationRules:
+      - expression: 'claims.sub.startsWith("system:serviceaccount:default:")'
+        message: "Only ServiceAccounts from the default namespace on the hub may authenticate."
+    claimMappings:
+      username:
+        claim: sub
+        prefix: "hub:"
+  dexIssuer:
+    enabled: true
+    url: "https://bm4080.taildf7067.ts.net/dex"
+    audiences:
+      - kubernetes
+    claimMappings:
+      username:
+        claim: sub
+        prefix: "dex:"
+      groups:
+        claim: groups
+        prefix: "dex:"
+
+oidcVerifier:
+  enabled: true
+  replicas: 1
+  issuer: "https://bm4080.taildf7067.ts.net/dex"
+  audience: ""
+  insecureSkipVerify: true
+  trustJWKS: |
+    {
+      "keys": [
+        {
+          "alg": "RS256",
+          "e": "AQAB",
+          "kid": "test-key-001",
+          "kty": "RSA",
+          "n": "ujOk4S16brZhQOwEBkOkQZjVSaY78vNcqR_ZyujcmQc3N3Ox1y_vshyF1fZBVYmGtPL93vFdw5NIBYuaVYhGtqUfjBQ4uLFtaLYC00m8oniJiJ0upnr3oqn96aw1tDmYLazd3gw_KQNpB2wIj3_IyIUjGZnVBd6CwrVxe1H87ts5GJwmhQ_1f_WcSE6HmCFdVstZR8lQlyjpTSQmz2G6GLUsDMkpOaCKXzHgjPGVeedLA6CDpJhQX4EJv43xYciao0RFHC8MpGze20Bkk8rOSgmoJqTSQjpquUAjBm0OD-zloYACpwzxPJ_y9VmA9W1qZh17hWpho-x0wPuKdVC0dw",
+          "use": "sig"
+        }
+      ]
+    }
+  image:
+    repository: sojoner/oidc-verifier
+    tag: dev
+    pullPolicy: Always
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 50m, memory: 64Mi }
+
+# Sends this spoke's pod and node metrics to the hub: kube-state-metrics for
+# pod state, the kubelet's cAdvisor endpoint for pod CPU and memory, scraped by
+# a Prometheus agent that remote-writes to the hub's metrics-ingest proxy.
+# Off by default: it needs clusterName and the credential Secret
+# (`make spoke-metrics-credentials`). Set both per spoke in values-<name>.yaml.
+metricsAgent:
+  enabled: false
+  # Must equal the cluster's name in the hub's fleet.clusters: it becomes the
+  # `cluster` label on every series, which the hub's alerts and probes also use.
+  clusterName: ""
+  remoteWriteURL: "http://hub-control-plane:30909/api/v1/write"
+  # Must match the hub's metricsIngest.username.
+  username: spoke-metrics
+  # Secret in this namespace with the key `password`.
+  credentialsSecret: hub-metrics-credentials
+  scrapeInterval: 30s
+  # Numeric UID of the images' `nobody` user.
+  runAsUser: 65534
+  image:
+    repository: prom/prometheus
+    tag: v2.53.0
+    pullPolicy: IfNotPresent
+  kubeStateMetrics:
+    image:
+      repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
+      tag: v2.19.1
+      pullPolicy: IfNotPresent
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { cpu: 100m, memory: 128Mi }
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 256Mi }
+
+admissionPolicies:
+  enabled: true
+  platformAdminSubjects:
+    - kind: Group
+      name: dex:platform-admin
+  additionalProtectedNamespaces: []
+
+bindingControllerRBAC:
+  enabled: true
+  hubIdentity: "hub:system:serviceaccount:default:binding-controller"
+
+tenants:
+  - id: acme-corp
+    dexGroups: ["acme-corp-admin", "acme-corp-developer", "acme-corp-analyst"]
+  - id: globex-inc
+    dexGroups: ["globex-inc-admin", "globex-inc-developer", "globex-inc-analyst"]
+
+# KubeVirt (VMs as a service). Enabled per spoke in values-<name>.yaml; the
+# spoke host needs /dev/kvm unless useEmulation is true.
+kubevirt:
+  enabled: false
+  useEmulation: false
+  imagePullPolicy: IfNotPresent
+
+# RBAC for the hub's vm-binding-controller on VM-capable spokes. Namespaces
+# beyond the tenants (e.g. the fallback namespace) go in extraNamespaces.
+vmBindingControllerRBAC:
+  enabled: false
+  hubIdentity: "hub:system:serviceaccount:default:vm-binding-controller"
+  extraNamespaces: [default]

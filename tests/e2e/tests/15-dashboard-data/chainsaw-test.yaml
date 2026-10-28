@@ -1,0 +1,73 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: dashboard-data-rendering
+spec:
+  description: "Phase 15 — Prove Grafana dashboards render actual Prometheus data by executing panel queries."
+  steps:
+  - try:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/hub-kube-prometheus-stack-prometheus 19090:9090 &
+          PF_PID=$!
+          sleep 5
+          QUERIES="binding_controller_reconcile_total up"
+          for query in $QUERIES; do
+            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${query}',safe=''))" 2>/dev/null || echo "${query}")
+            COUNT=$(curl -s "http://localhost:19090/api/v1/query?query=${ENCODED}" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',{}).get('result',[])))" 2>/dev/null || echo "0")
+            if [ "$COUNT" -gt 0 ]; then
+              echo "PASS: $query → $COUNT result(s)"
+            else
+              echo "FAIL: $query → no data in Prometheus"
+              kill $PF_PID 2>/dev/null || true
+              exit 1
+            fi
+          done
+          kill $PF_PID 2>/dev/null || true
+          echo "PASS: all dashboard panel queries return data"
+    cluster: hub
+  - try:
+    - script:
+        content: |
+          # Grafana's dashboard-sidecar provisioning is awaited during
+          # `make deploy` (deploy-wave2), not here — by validate time this
+          # must already be ready, same as every other hub resource.
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/hub-grafana 3015:80 &
+          PF_PID=$!
+          sleep 5
+          DASHBOARD=$(curl -s http://admin:admin@localhost:3015/api/dashboards/uid/controller-deep-dive 2>/dev/null || echo "{}")
+          kill $PF_PID 2>/dev/null || true
+          # printf, not echo: this dashboard's panels embed literal "\n" inside
+          # JSON string values (markdown panel content) — /bin/sh's echo
+          # interprets those as real newlines, corrupting the JSON before
+          # python ever sees it. printf %s passes the bytes through untouched.
+          TITLE=$(printf '%s' "$DASHBOARD" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dashboard',{}).get('title','NONE'))" 2>/dev/null || echo "NONE")
+          if [ "$TITLE" != "NONE" ]; then
+            echo "PASS: dashboard loaded with title '$TITLE'"
+          else
+            echo "FAIL: dashboard not found"
+            exit 1
+          fi
+    cluster: hub
+  - try:
+    - script:
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/hub-kube-prometheus-stack-prometheus 19091:9090 &
+          PF_PID=$!
+          sleep 5
+          for query in \
+            count\(kube_node_status_condition\{condition\=\"Ready\"\,status\=\"true\"\}\) \
+            kube_pod_status_phase\{phase\!\=\"Running\"\,phase\!\=\"Succeeded\"\}; do
+            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${query}',safe=''))" 2>/dev/null || echo "${query}")
+            RESULT=$(curl -s "http://localhost:19091/api/v1/query?query=${ENCODED}" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',{}).get('result',[])))" 2>/dev/null || echo "0")
+            if [ "$RESULT" -gt 0 ]; then
+              echo "PASS: $query → $RESULT result(s)"
+            else
+              echo "FAIL: $query → no data"
+              kill $PF_PID 2>/dev/null || true
+              exit 1
+            fi
+          done
+          kill $PF_PID 2>/dev/null || true
+          echo "PASS: cluster-fitness panel queries return data"
+    cluster: hub

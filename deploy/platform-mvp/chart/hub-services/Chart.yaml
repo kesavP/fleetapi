@@ -1,0 +1,4 @@
+apiVersion: v2
+name: hub-services
+description: Platform MVP hub controllers — Kro + binding-controller + fleet
+version: 0.1.2

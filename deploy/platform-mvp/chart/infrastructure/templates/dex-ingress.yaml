@@ -1,0 +1,33 @@
+{{- if and .Values.dex.enabled .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dex
+  namespace: {{ .Values.dex.namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    {{- if (index .Values "cert-manager" "enabled") }}
+    cert-manager.io/cluster-issuer: selfsigned-issuer
+    {{- end }}
+spec:
+  ingressClassName: nginx
+  {{- if (index .Values "cert-manager" "enabled") }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: ingress-tls
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - pathType: Prefix
+            path: /dex
+            backend:
+              service:
+                name: dex
+                port:
+                  number: 5556
+{{ end }}

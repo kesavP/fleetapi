@@ -1,0 +1,149 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vmset-lifecycle
+spec:
+  cluster: hub
+  description: >
+    Phase 25 — A VmSet becomes running VMs on eu with the cloud-init Secret
+    copied across, status flows back to the hub, replicas scale down highest
+    index first, and deleting the VmSet removes everything from eu.
+  steps:
+  - name: order two VMs
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: life
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 2
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+  - name: VMs and Secret run on eu
+    cluster: eu
+    try:
+    - assert:
+        timeout: 180s
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: life-eu-0
+            namespace: acme-corp
+            labels:
+              platform.example.com/tenant: acme-corp
+          status:
+            ready: true
+    - assert:
+        timeout: 180s
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: life-eu-1
+            namespace: acme-corp
+          status:
+            ready: true
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: life-cloudinit
+            namespace: acme-corp
+  - name: status flows back to the hub
+    try:
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: life-eu
+          status:
+            regions:
+            - region: eu
+              phase: Ready
+              readyReplicas: 2
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: life
+          status:
+            regions:
+            - regions:
+              - region: eu
+                phase: Ready
+  - name: scale down removes the highest index
+    try:
+    - patch:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: life
+          spec:
+            replicas: 1
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: life-eu
+          status:
+            regions:
+            - phase: Ready
+              readyReplicas: 1
+  - name: life-eu-1 is gone from eu
+    cluster: eu
+    try:
+    - error:
+        timeout: 120s
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: life-eu-1
+            namespace: acme-corp
+    - assert:
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: life-eu-0
+            namespace: acme-corp
+  - name: delete the VmSet
+    try:
+    - delete:
+        ref:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          name: life
+  - name: eu is cleaned up
+    cluster: eu
+    try:
+    - error:
+        timeout: 120s
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: life-eu-0
+            namespace: acme-corp
+    - error:
+        timeout: 60s
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: life-cloudinit
+            namespace: acme-corp

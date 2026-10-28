@@ -1,0 +1,9 @@
+# Per-spoke overrides on top of values.yaml. Everything that differs between
+# spokes lives here; shared defaults stay in values.yaml.
+authConfiguration:
+  hubIssuer:
+    audience: "homelab:us-spoke"
+
+metricsAgent:
+  enabled: true
+  clusterName: us

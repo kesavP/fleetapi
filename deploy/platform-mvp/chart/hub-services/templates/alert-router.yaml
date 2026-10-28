@@ -1,0 +1,102 @@
+{{- if .Values.alertRouter.enabled }}
+# Receives Alertmanager's webhook (configured in the infrastructure chart,
+# kube-prometheus-stack.alertmanager.config) and forwards alerts to its sinks.
+# Runs in `monitoring` beside Alertmanager and the alert-router-token Secret.
+# One replica on purpose: duplicate suppression is held in memory, so a second
+# replica would let the same alert through twice.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alert-router
+  namespace: monitoring
+# The router never calls the Kubernetes API, so it gets no token.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-router
+  namespace: monitoring
+  labels:
+    app: alert-router
+spec:
+  selector:
+    app: alert-router
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-router
+  namespace: monitoring
+  labels:
+    app: alert-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-router
+  template:
+    metadata:
+      labels:
+        app: alert-router
+    spec:
+      serviceAccountName: alert-router
+      automountServiceAccountToken: false
+      volumes:
+        - name: token
+          secret:
+            secretName: alert-router-token
+      containers:
+        - name: alert-router
+          image: "{{ .Values.alertRouter.image.repository }}:{{ .Values.alertRouter.image.tag }}"
+          imagePullPolicy: {{ .Values.alertRouter.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --token-file=/etc/alert-router/token/token
+            - --dedupe-interval={{ .Values.alertRouter.dedupeInterval }}
+            - --sink-timeout={{ .Values.alertRouter.sinkTimeout }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.alertRouter.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: token
+              mountPath: /etc/alert-router/token
+              readOnly: true
+          resources:
+            {{- toYaml .Values.alertRouter.resources | nindent 12 }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: alert-router
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app: alert-router
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+{{- end }}

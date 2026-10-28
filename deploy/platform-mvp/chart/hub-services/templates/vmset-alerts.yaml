@@ -1,0 +1,66 @@
+{{- if .Values.vmSetAlerts.enabled }}
+# Alerts on the vmset_* metrics kube-state-metrics derives from VmSet status
+# (see kube-state-metrics.customResourceState in the infrastructure chart).
+# Every alert carries vmset, tenant and region labels so a receiver, or a
+# triage agent, can look the object up directly.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vmset
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: vmset
+      rules:
+        # Pending covers every state that is neither Ready nor Unschedulable,
+        # so the wait is long enough to ignore a normal VM boot.
+        - alert: VmSetNotReady
+          expr: vmset_region_phase{phase="Pending"} == 1
+          for: {{ .Values.vmSetAlerts.pendingFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `VmSet {{ $labels.vmset }} is not ready in {{ $labels.region }}` | quote }}
+            description: {{ `{{ $labels.tenant }}/{{ $labels.vmset }} has stayed Pending in {{ $labels.region }} past the grace period.` | quote }}
+        # The region offers no VM-capable cluster, so the request cannot be
+        # placed until a spoke is registered or recovers.
+        - alert: VmSetUnschedulable
+          expr: vmset_region_phase{phase="Unschedulable"} == 1
+          for: {{ .Values.vmSetAlerts.unschedulableFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `VmSet {{ $labels.vmset }} cannot be placed in {{ $labels.region }}` | quote }}
+            description: {{ `No VM-capable cluster serves {{ $labels.region }} for {{ $labels.tenant }}/{{ $labels.vmset }}.` | quote }}
+        # A VmSet that exists but has no regional status means the controllers
+        # are not reporting at all (down, or cannot reach the hub API).
+        - alert: VmSetNotReporting
+          expr: vmset_replicas unless on (vmset, tenant) vmset_region_phase
+          for: {{ .Values.vmSetAlerts.notReportingFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `VmSet {{ $labels.vmset }} has no status` | quote }}
+            description: {{ `{{ $labels.tenant }}/{{ $labels.vmset }} has no regional status; check the vm-binding-controller and its Kro RGD.` | quote }}
+        # A VM's launcher pod that is not Running (Failed, Unknown, or stuck
+        # Pending) while the VmSet may still look fine at region level.
+        - alert: VmSetPodsNotRunning
+          expr: vmset_region_pods_not_running > 0
+          for: {{ .Values.vmSetAlerts.podsNotRunningFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `VM pods of {{ $labels.vmset }} are not running in {{ $labels.region }}` | quote }}
+            description: {{ `{{ $value }} VM pod(s) of {{ $labels.tenant }}/{{ $labels.vmset }} in {{ $labels.region }} are not in phase Running.` | quote }}
+        # The restart total can drop when a VM is replaced; Prometheus treats
+        # that as a counter reset, so increase() still counts the new pod's restarts.
+        - alert: VmSetPodRestarting
+          expr: increase(vmset_region_pod_restarts[{{ .Values.vmSetAlerts.podRestartWindow }}]) >= {{ .Values.vmSetAlerts.podRestartThreshold }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `VM pods of {{ $labels.vmset }} keep restarting in {{ $labels.region }}` | quote }}
+            description: {{ `{{ $labels.tenant }}/{{ $labels.vmset }} in {{ $labels.region }} reached the pod restart threshold within the alert window.` | quote }}
+{{- end }}

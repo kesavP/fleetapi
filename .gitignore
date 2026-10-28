@@ -1,0 +1,48 @@
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+kubeconfig-*
+.env
+.env.local
+*.kubeconfig
+
+# Helm chart dependencies (downloaded tarballs)
+deploy/platform-mvp/chart/*/charts/*.tgz
+deploy/platform-mvp/chart/*/Chart.lock
+
+# AI assistant plan files (not part of the codebase)
+.claude/
+
+# Chainsaw test run artifacts
+tests/e2e/chainsaw-report.json
+chainsaw-report.json
+
+# Go compiled binaries (checked in by mistake — removed from tracking)
+platform-mvp/dex-auth-plugin/dex-auth-plugin
+bin/
+
+# Generated per spoke from kind-spoke.yaml.tmpl (make render-kind-config-<spoke>)
+# + each spoke's bootstrap AuthenticationConfiguration (make ensure-spoke-auth-config)
+deploy/platform-mvp/kind/rendered/
+deploy/platform-mvp/kind/*-auth/
+
+# Cryptographic key material (do not commit)
+*.pem
+*.key
+*.pub
+*.jwks
+*.jwt
+*.p12
+*.pfx

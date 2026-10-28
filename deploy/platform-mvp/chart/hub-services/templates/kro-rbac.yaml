@@ -1,0 +1,54 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kro:platform.example.com
+  labels:
+    rbac.kro.run/aggregate-to-controller: "true"
+rules:
+  - apiGroups:
+      - platform.example.com
+    resources:
+      - globalwidgets
+      - globalwidgets/status
+      - globalwidgets/finalizers
+      - regionalwidgetrequests
+      - regionalwidgetrequests/status
+      - regionalwidgetrequests/finalizers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - platform.example.com
+    resources:
+      - vmsets
+      - vmsets/status
+      - vmsets/finalizers
+      - regionalvmsetrequests
+      - regionalvmsetrequests/status
+      - regionalvmsetrequests/finalizers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # VmSet emits the cloud-init Secret on the hub.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch

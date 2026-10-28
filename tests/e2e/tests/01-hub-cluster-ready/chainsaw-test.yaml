@@ -1,0 +1,13 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: hub-cluster-ready
+spec:
+  description: "Phase 1 — Verify hub cluster is operational"
+  steps:
+  - try:
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+    cluster: hub

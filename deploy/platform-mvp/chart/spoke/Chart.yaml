@@ -1,0 +1,4 @@
+apiVersion: v2
+name: spoke
+description: Platform MVP spoke — widget-operator + oidc-verifier + tenant RBAC (per-spoke values-<name>.yaml)
+version: 0.2.0

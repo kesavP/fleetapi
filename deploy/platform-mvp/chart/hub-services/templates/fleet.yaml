@@ -1,0 +1,16 @@
+{{- range .Values.fleet.clusters }}
+---
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ClusterProfile
+metadata:
+  name: {{ .name }}
+  namespace: default
+  {{- with .labels }}
+  labels:
+{{ toYaml . | indent 4 }}
+  {{- end }}
+spec:
+  clusterManager:
+    name: {{ .name }}-fleet-manager
+  displayName: {{ .displayName | quote }}
+{{- end }}

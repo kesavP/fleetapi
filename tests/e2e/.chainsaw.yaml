@@ -1,0 +1,25 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: platform-mvp
+spec:
+  timeouts:
+    apply: 30s
+    assert: 60s
+    cleanup: 30s
+    delete: 30s
+    error: 10s
+    exec: 5m
+  failFast: true
+  parallel: 1
+  skipDelete: false
+  reportFormat: JSON
+  reportName: chainsaw-report
+  fullName: true
+  clusters:
+    hub:
+      kubeconfig: ./kubeconfig-hub
+    us:
+      kubeconfig: ./kubeconfig-us-internal
+    eu:
+      kubeconfig: ./kubeconfig-eu-internal

@@ -1,0 +1,152 @@
+# E2E Test: Multi-Tenant Isolation
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: multi-tenant-isolation
+spec:
+  description: >
+    Verify strict namespace isolation between tenants. acme-corp and globex-inc
+    Widgets must land in separate namespaces and must not be cross-visible.
+  steps:
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            for ns in acme-corp globex-inc; do
+              kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+            done
+            echo "PASS: tenant namespaces created"
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 60s
+          content: |
+            kubectl apply --validate=false -f - <<'RWR'
+            apiVersion: platform.example.com/v1alpha1
+            kind: RegionalWidgetRequest
+            metadata:
+              name: e2e-tenant-acme-us
+              namespace: default
+              labels:
+                platform.example.com/tenant: acme-corp
+            spec:
+              region: us
+              message: "acme-corp tenant isolation test"
+            RWR
+            echo "PASS: acme-corp RegionalWidgetRequest created"
+      cluster: hub
+      finally:
+      - script:
+          content: |
+            kubectl delete regionalwidgetrequest e2e-tenant-acme-us -n default --ignore-not-found 2>/dev/null || true
+            kubectl delete widget e2e-tenant-acme-us -n acme-corp --ignore-not-found 2>/dev/null || true
+
+    - try:
+      - script:
+          timeout: 60s
+          content: |
+            kubectl apply --validate=false -f - <<'RWR'
+            apiVersion: platform.example.com/v1alpha1
+            kind: RegionalWidgetRequest
+            metadata:
+              name: e2e-tenant-globex-us
+              namespace: default
+              labels:
+                platform.example.com/tenant: globex-inc
+            spec:
+              region: us
+              message: "globex-inc tenant isolation test"
+            RWR
+            echo "PASS: globex-inc RegionalWidgetRequest created"
+      cluster: hub
+      finally:
+      - script:
+          content: |
+            kubectl delete regionalwidgetrequest e2e-tenant-globex-us -n default --ignore-not-found 2>/dev/null || true
+            kubectl delete widget e2e-tenant-globex-us -n globex-inc --ignore-not-found 2>/dev/null || true
+
+    - try:
+      - script:
+          timeout: 90s
+          content: |
+            for i in $(seq 1 45); do
+              NS=$(kubectl get widget e2e-tenant-acme-us -n acme-corp -o jsonpath='{.metadata.namespace}' 2>/dev/null || echo "")
+              if [ "$NS" = "acme-corp" ]; then
+                echo "PASS: acme-corp Widget created in acme-corp namespace"
+                break
+              fi
+              sleep 2
+            done
+            if [ "$NS" != "acme-corp" ]; then
+              echo "FAIL: acme-corp Widget not found in acme-corp namespace"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 90s
+          content: |
+            for i in $(seq 1 45); do
+              NS=$(kubectl get widget e2e-tenant-globex-us -n globex-inc -o jsonpath='{.metadata.namespace}' 2>/dev/null || echo "")
+              if [ "$NS" = "globex-inc" ]; then
+                echo "PASS: globex-inc Widget created in globex-inc namespace"
+                break
+              fi
+              sleep 2
+            done
+            if [ "$NS" != "globex-inc" ]; then
+              echo "FAIL: globex-inc Widget not found in globex-inc namespace"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # acme-corp analyst should NOT see globex-inc widgets
+            RESULT=$(kubectl get widgets -n globex-inc --as=dex:carol@acme-corp.example.com --as-group=dex:acme-corp-analyst 2>&1 || true)
+            if echo "$RESULT" | grep -qi "forbidden\|denied\|cannot"; then
+              echo "PASS: acme-corp user denied access to globex-inc namespace"
+            else
+              echo "FAIL: acme-corp user should not access globex-inc namespace"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # globex-inc analyst should NOT see acme-corp widgets
+            RESULT=$(kubectl get widgets -n acme-corp --as=dex:frank@globex-inc.example.com --as-group=dex:globex-inc-analyst 2>&1 || true)
+            if echo "$RESULT" | grep -qi "forbidden\|denied\|cannot"; then
+              echo "PASS: globex-inc user denied access to acme-corp namespace"
+            else
+              echo "FAIL: globex-inc user should not access acme-corp namespace"
+              exit 1
+            fi
+      cluster: us
+
+    - try:
+      - script:
+          timeout: 30s
+          content: |
+            # Verify metrics carry correct tenant labels
+            kubectl -n default port-forward svc/binding-controller 18019:8080 &
+            PF_PID=$!
+            sleep 3
+            METRICS=$(curl -s http://localhost:18019/metrics || echo "")
+            kill $PF_PID 2>/dev/null || true
+
+            for T in acme-corp globex-inc; do
+              if echo "$METRICS" | grep -q "tenant_id=\"$T\""; then
+                echo "PASS: metrics carry tenant_id=$T"
+              else
+                echo "FAIL: metrics missing tenant_id=$T"
+                exit 1
+              fi
+            done
+      cluster: hub

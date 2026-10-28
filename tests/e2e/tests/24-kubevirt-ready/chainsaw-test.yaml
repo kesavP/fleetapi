@@ -1,0 +1,35 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: kubevirt-ready
+spec:
+  description: "Phase 22 — KubeVirt is deployed on the eu spoke and runs VMs on hardware virtualization"
+  steps:
+  - try:
+    - assert:
+        resource:
+          apiVersion: kubevirt.io/v1
+          kind: KubeVirt
+          metadata:
+            name: kubevirt
+            namespace: kubevirt
+          status:
+            phase: Deployed
+        timeout: 5m
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              kubevirt.io/schedulable: "true"
+        timeout: 2m
+    - script:
+        content: |
+          EMU=$(kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.spec.configuration.developerConfiguration.useEmulation}')
+          if [ "$EMU" = "true" ]; then
+            echo "FAIL: software emulation is on; VMs must use KVM"
+            exit 1
+          fi
+          echo "OK: useEmulation='${EMU}' (hardware virtualization)"
+    cluster: eu

@@ -1,0 +1,200 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vmset-provisioning
+spec:
+  cluster: hub
+  description: >
+    Phase 23 — Hub half of the VmSet service: a VmSet expands into a
+    tenant-labelled cloud-init Secret and one RegionalVmSetRequest per region
+    with the tier's cpu/memory; bad input and size changes are rejected.
+  steps:
+  - name: size S expands to Secret + request
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: demo
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 2
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: demo-eu
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            region: eu
+            replicas: 2
+            cpu: 1
+            memory: 1Gi
+            image: quay.io/kubevirt/cirros-container-disk-demo:v1.9.1
+            cloudInitSecretName: demo-cloudinit
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: demo-cloudinit
+            labels:
+              platform.example.com/tenant: acme-corp
+              platform.example.com/vmset: demo
+    - script:
+        content: |
+          UD=$(kubectl get secret demo-cloudinit -n "$NAMESPACE" -o jsonpath='{.data.userdata}' | base64 -d)
+          echo "$UD" | grep -q '^#!/bin/sh' || { echo "FAIL: user-data is not a shell script"; exit 1; }
+          echo "$UD" | grep -q 'AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' || { echo "FAIL: ssh key missing from user-data"; exit 1; }
+          echo "$UD" | grep -q 'platform-cloudinit-ok' || { echo "FAIL: marker missing from user-data"; exit 1; }
+          echo "OK: user-data carries the key and the marker"
+
+  - name: size M maps to 2 vCPU / 2 GiB
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: demo-m
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [eu]
+            size: M
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: demo-m-eu
+          spec:
+            cpu: 2
+            memory: 2Gi
+
+  - name: size defaults to S
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: demo-default
+            labels:
+              platform.example.com/tenant: acme-corp
+          spec:
+            regions: [eu]
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: demo-default-eu
+          spec:
+            cpu: 1
+            memory: 1Gi
+
+  - name: replicas can scale, size cannot change
+    try:
+    - patch:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: demo
+          spec:
+            replicas: 1
+    - assert:
+        timeout: 60s
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: RegionalVmSetRequest
+          metadata:
+            name: demo-eu
+          spec:
+            replicas: 1
+    - patch:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: demo
+          spec:
+            size: M
+        expect:
+        - check:
+            ($error != null): true
+
+  - name: invalid input is rejected
+    try:
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: bad-size
+          spec:
+            regions: [eu]
+            size: L
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+        expect:
+        - check:
+            ($error != null): true
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: bad-replicas-zero
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 0
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+        expect:
+        - check:
+            ($error != null): true
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: bad-replicas-many
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 4
+            sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl demo@example"
+        expect:
+        - check:
+            ($error != null): true
+    - apply:
+        resource:
+          apiVersion: platform.example.com/v1alpha1
+          kind: VmSet
+          metadata:
+            name: bad-key
+          spec:
+            regions: [eu]
+            size: S
+            replicas: 1
+            sshPublicKey: "ssh-ed25519 AAAA'; rm -rf / #"
+        expect:
+        - check:
+            ($error != null): true

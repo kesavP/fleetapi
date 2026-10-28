@@ -1,0 +1,61 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: ingress-and-log-shipping
+spec:
+  description: "Phase 7 — Verify ingress controller, Grafana ingress, event exporter, and Loki ready"
+  steps:
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: monitoring
+            name: hub-ingress-nginx-controller
+        timeout: 2m
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            namespace: monitoring
+            name: grafana
+        timeout: 30s
+    cluster: hub
+  - try:
+    - script:
+        timeout: 60s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/hub-grafana 3009:80 &
+          PF_PID=$!
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3009/api/health 2>/dev/null || echo "000")
+          kill $PF_PID 2>/dev/null || true
+          echo "Grafana health via port-forward: HTTP ${STATUS}"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ] || exit 1
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: monitoring
+            name: event-exporter
+        timeout: 2m
+    cluster: hub
+  - try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/loki 13100:3100 &
+          PF_PID=$!
+          sleep 3
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:13100/ready || echo "000")
+          kill $PF_PID 2>/dev/null || true
+          [ "$STATUS" = "200" ] || exit 1
+          echo "Loki ready and accepting pushes"
+    cluster: hub

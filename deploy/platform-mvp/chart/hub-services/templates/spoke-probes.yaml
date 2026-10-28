@@ -1,0 +1,178 @@
+{{- if .Values.spokeProbes.enabled }}
+# Probes each spoke's API server from the hub with a blackbox exporter, and
+# alerts when one is unreachable, slow, close to certificate expiry, or no
+# longer being probed. It tells a network or API-server failure apart from a
+# controller problem. The probe verifies reachability and latency, not trust:
+# it sends no credentials, so skipping certificate verification exposes
+# nothing, and the certificate's expiry is still measured.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+data:
+  blackbox.yml: |
+    modules:
+      spoke_api:
+        prober: http
+        timeout: 5s
+        http:
+          method: GET
+          # An API server that answers 401 or 403 is up; it only refused the
+          # anonymous request.
+          valid_status_codes: [200, 401, 403]
+          fail_if_not_ssl: true
+          preferred_ip_protocol: ip4
+          tls_config:
+            insecure_skip_verify: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+  labels:
+    app: blackbox-exporter
+spec:
+  selector:
+    app: blackbox-exporter
+  ports:
+    - name: http
+      port: 9115
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+  labels:
+    app: blackbox-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blackbox-exporter
+  template:
+    metadata:
+      labels:
+        app: blackbox-exporter
+      annotations:
+        # Roll the pod when the module config changes.
+        checksum/config: {{ .Values.spokeProbes | toJson | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      volumes:
+        - name: config
+          configMap:
+            name: blackbox-exporter
+      containers:
+        - name: blackbox-exporter
+          image: "{{ .Values.spokeProbes.image.repository }}:{{ .Values.spokeProbes.image.tag }}"
+          imagePullPolicy: {{ .Values.spokeProbes.image.pullPolicy }}
+          args:
+            - --config.file=/etc/blackbox/blackbox.yml
+          ports:
+            - name: http
+              containerPort: 9115
+          readinessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ .Values.spokeProbes.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/blackbox
+              readOnly: true
+          resources:
+            {{- toYaml .Values.spokeProbes.resources | nindent 12 }}
+{{- range .Values.fleet.clusters }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: spoke-api-{{ .name }}
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  interval: {{ $.Values.spokeProbes.interval }}
+  module: spoke_api
+  prober:
+    url: blackbox-exporter.monitoring.svc:9115
+  targets:
+    staticConfig:
+      static:
+        - {{ printf "%s%s" (.apiURL | default (printf "https://%s-control-plane:6443" .name)) $.Values.spokeProbes.path | quote }}
+      labels:
+        cluster: {{ .name }}
+        check: spoke-api
+{{- end }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spoke-probes
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: spoke-api
+      rules:
+        - alert: SpokeAPIUnreachable
+          expr: probe_success{check="spoke-api"} == 0
+          for: {{ .Values.spokeProbes.unreachableFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: {{ `API server of cluster {{ $labels.cluster }} is unreachable from the hub` | quote }}
+            description: {{ `The probe of {{ $labels.instance }} has failed; the hub cannot reach, or get a valid answer from, cluster {{ $labels.cluster }}.` | quote }}
+        - alert: SpokeAPISlow
+          expr: probe_duration_seconds{check="spoke-api"} > {{ .Values.spokeProbes.slowSeconds }}
+          for: {{ .Values.spokeProbes.slowFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `API server of cluster {{ $labels.cluster }} answers slowly` | quote }}
+            description: {{ `Probing {{ $labels.instance }} takes {{ $value | humanizeDuration }}.` | quote }}
+        - alert: SpokeAPICertificateExpiring
+          expr: (probe_ssl_earliest_cert_expiry{check="spoke-api"} - time()) < {{ mul .Values.spokeProbes.certWarnDays 86400 }}
+          for: {{ .Values.spokeProbes.certWarnFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `API server certificate of cluster {{ $labels.cluster }} expires soon` | quote }}
+            description: {{ `The certificate served at {{ $labels.instance }} expires in {{ $value | humanizeDuration }}.` | quote }}
+        - alert: SpokeAPICertificateExpiringSoon
+          expr: (probe_ssl_earliest_cert_expiry{check="spoke-api"} - time()) < {{ mul .Values.spokeProbes.certCriticalDays 86400 }}
+          for: {{ .Values.spokeProbes.certCriticalFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: {{ `API server certificate of cluster {{ $labels.cluster }} expires within days` | quote }}
+            description: {{ `The certificate served at {{ $labels.instance }} expires in {{ $value | humanizeDuration }}.` | quote }}
+{{- range .Values.fleet.clusters }}
+        # Without this, a stopped exporter or a dropped Probe leaves nothing to
+        # alert on and looks like a healthy cluster.
+        - alert: SpokeAPIProbeMissing
+          expr: absent(probe_success{check="spoke-api", cluster={{ .name | quote }}})
+          for: {{ $.Values.spokeProbes.missingFor }}
+          labels:
+            severity: warning
+            cluster: {{ .name | quote }}
+          annotations:
+            summary: {{ printf "Spoke API probe for cluster %s is not reporting" .name | quote }}
+            description: {{ printf "No probe results for cluster %s; check the blackbox-exporter and the spoke-api-%s Probe." .name .name | quote }}
+{{- end }}
+{{- end }}

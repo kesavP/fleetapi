@@ -1,0 +1,22 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    image: __NODE_IMAGE__
+    kubeadmConfigPatches:
+    - |
+      kind: ClusterConfiguration
+      apiServer:
+        extraArgs:
+          authentication-config: "/etc/kubernetes/auth/authentication-configuration.yaml"
+        extraVolumes:
+          - name: auth-config
+            hostPath: /etc/kubernetes/auth
+            mountPath: /etc/kubernetes/auth
+            readOnly: true
+    extraMounts:
+      - hostPath: __AUTH_DIR__
+        containerPath: /etc/kubernetes/auth
+        readOnly: true
+  - role: worker
+    image: __NODE_IMAGE__

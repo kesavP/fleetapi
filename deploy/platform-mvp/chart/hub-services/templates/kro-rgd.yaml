@@ -1,0 +1,28 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: globalwidget.platform.example.com
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: GlobalWidget
+    group: platform.example.com
+    spec:
+      regions: '[]string | description="Regions to provision widgets in (us, eu, asia)"'
+      message: string | default="" description="Payload carried through to each region's Widget"
+    status:
+      regions: ${regionalWidgetRequest.map(r, r.status)}
+  resources:
+    - id: regionalWidgetRequest
+      template:
+        apiVersion: platform.example.com/v1alpha1
+        kind: RegionalWidgetRequest
+        metadata:
+          name: "${schema.metadata.name}-${region}"
+          labels:
+            platform.example.com/tenant: '${schema.metadata.labels["platform.example.com/tenant"]}'
+        spec:
+          region: "${region}"
+          message: "${schema.spec.message}"
+      forEach:
+        - region: "${schema.spec.regions}"

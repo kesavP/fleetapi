@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: binding-controller
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: binding-controller
+rules:
+  - apiGroups: ["platform.example.com"]
+    resources: ["regionalwidgetrequests", "regionalwidgetrequests/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["multicluster.x-k8s.io"]
+    resources: ["clusterprofiles"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: binding-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: binding-controller
+subjects:
+  - kind: ServiceAccount
+    name: binding-controller
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: binding-controller
+  namespace: default
+  labels:
+    app: binding-controller
+spec:
+  replicas: {{ .Values.bindingController.replicas }}
+  selector:
+    matchLabels:
+      app: binding-controller
+  template:
+    metadata:
+      labels:
+        app: binding-controller
+    spec:
+      serviceAccountName: binding-controller
+      {{- if or .Values.bindingController.spokeTokens .Values.bindingController.dex.enabled }}
+      volumes:
+        {{- if .Values.bindingController.spokeTokens }}
+        - name: spoke-tokens
+          projected:
+            sources:
+{{ toYaml .Values.bindingController.spokeTokens | indent 14 }}
+        {{- end }}
+        {{- if .Values.bindingController.dex.enabled }}
+        - name: dex-auth-plugin
+          emptyDir: {}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: binding-controller
+          image: "{{ .Values.bindingController.image.repository }}:{{ .Values.bindingController.image.tag }}"
+          imagePullPolicy: {{ .Values.bindingController.image.pullPolicy }}
+          env:
+            - name: DEX_ISSUER
+              value: "{{ .Values.dex.issuer }}"
+            {{- if .Values.bindingController.dex.enabled }}
+            - name: DEX_CLIENT_ID
+              value: "{{ .Values.bindingController.dex.clientID }}"
+            - name: DEX_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bindingController.dex.secretName }}
+                  key: {{ .Values.bindingController.dex.secretKey }}
+            - name: DEX_AUTH_PLUGIN
+              value: "/usr/local/bin/dex-auth-plugin"
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.bindingController.metricsPort }}
+          volumeMounts:
+            {{- if .Values.bindingController.spokeTokens }}
+            - name: spoke-tokens
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            {{- end }}
+            {{- if .Values.bindingController.dex.enabled }}
+            - name: dex-auth-plugin
+              mountPath: /usr/local/bin/dex-auth-plugin
+              subPath: dex-auth-plugin
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.bindingController.resources | nindent 12 }}
+      {{- if .Values.bindingController.dex.enabled }}
+      initContainers:
+        - name: copy-dex-auth-plugin
+          image: "{{ .Values.bindingController.dex.pluginImage.repository }}:{{ .Values.bindingController.dex.pluginImage.tag }}"
+          imagePullPolicy: {{ .Values.bindingController.dex.pluginImage.pullPolicy }}
+          command: ["cp", "/usr/local/bin/dex-auth-plugin", "/plugin/dex-auth-plugin"]
+          volumeMounts:
+            - name: dex-auth-plugin
+              mountPath: /plugin
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: binding-controller
+  namespace: default
+  labels:
+    app: binding-controller
+spec:
+  selector:
+    app: binding-controller
+  ports:
+    - name: metrics
+      port: {{ .Values.bindingController.metricsPort }}
+      targetPort: metrics

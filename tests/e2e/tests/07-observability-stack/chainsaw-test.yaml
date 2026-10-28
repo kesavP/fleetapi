@@ -1,0 +1,79 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: observability-stack-healthy
+spec:
+  description: "Phase 7 — Verify LGTM observability stack is deployed and healthy"
+  steps:
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: monitoring
+            name: hub-kube-prometheus-stack-operator
+        timeout: 2m
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            namespace: monitoring
+            name: prometheus-hub-kube-prometheus-stack-prometheus
+        timeout: 3m
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            namespace: monitoring
+            name: hub-grafana
+        timeout: 2m
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            namespace: monitoring
+            name: loki
+        timeout: 2m
+    cluster: hub
+  - try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring wait --for=condition=Available deploy/hub-grafana --timeout=30s
+    cluster: hub
+  - try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring rollout status statefulset/loki --timeout=30s
+    cluster: hub
+  - try:
+    - script:
+        timeout: 60s
+        content: |
+          kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring port-forward svc/hub-grafana 3007:80 &
+          PF_PID=$!
+          sleep 5
+          HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3007/api/health || echo "000")
+          kill $PF_PID 2>/dev/null || true
+          [ "$HEALTH" = "200" ] || exit 1
+    cluster: hub
+  - try:
+    - assert:
+        resource:
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            namespace: monitoring
+            name: binding-controller
+    cluster: hub

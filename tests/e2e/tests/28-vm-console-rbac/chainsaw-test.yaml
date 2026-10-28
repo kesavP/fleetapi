@@ -1,0 +1,71 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: vm-console-rbac
+spec:
+  cluster: eu
+  description: >
+    Phase 24 — RBAC on the eu spoke for the VM service. The hub's
+    vm-binding-controller manages VMs and Secrets only in tenant namespaces;
+    tenants may read VMs and open a console according to their role tier,
+    never create VMs directly, and never reach another tenant.
+  steps:
+  - name: vm-binding-controller scope
+    try:
+    - script:
+        content: |
+          set -u
+          C="hub:system:serviceaccount:default:vm-binding-controller"
+          can() { kubectl auth can-i "$@" --as="$C"; }
+          fail=0
+          expect() { want=$1; shift; got=$(can "$@"); if [ "$got" != "$want" ]; then echo "FAIL: can-i $* => $got, want $want"; fail=1; else echo "OK: can-i $* => $got"; fi; }
+          expect yes list   virtualmachines.kubevirt.io -A
+          expect yes watch  virtualmachines.kubevirt.io -A
+          expect yes create virtualmachines.kubevirt.io -n acme-corp
+          expect yes delete virtualmachines.kubevirt.io -n globex-inc
+          expect yes create secrets -n acme-corp
+          expect yes delete secrets -n globex-inc
+          expect no  create virtualmachines.kubevirt.io -n kube-system
+          expect no  create secrets -n kube-system
+          expect no  get    secrets -n kube-system
+          expect no  create pods -n acme-corp
+          expect no  create clusterroles.rbac.authorization.k8s.io
+          exit $fail
+  - name: tenant role tiers
+    try:
+    - script:
+        content: |
+          set -u
+          fail=0
+          # SubjectAccessReview, not `kubectl auth can-i`: can-i mis-parses
+          # resource/subresource.group strings and can answer wrongly.
+          allowed() { # user group verb apiGroup resource subresource namespace
+            cat <<EOF | kubectl create -f - -o jsonpath='{.status.allowed}'
+          apiVersion: authorization.k8s.io/v1
+          kind: SubjectAccessReview
+          spec:
+            user: "dex:$1"
+            groups: ["dex:$2"]
+            resourceAttributes: {verb: "$3", group: "$4", resource: "$5", subresource: "$6", namespace: "$7"}
+          EOF
+          }
+          expect() { want=$1; shift; got=$(allowed "$@"); if [ "$got" != "$want" ]; then echo "FAIL: $* => $got, want $want"; fail=1; else echo "OK: $* => $got"; fi; }
+          ALICE="alice@acme-corp.example.com acme-corp-admin"
+          BOB="bob@acme-corp.example.com acme-corp-developer"
+          CAROL="carol@acme-corp.example.com acme-corp-analyst"
+          EVE="eve@globex-inc.example.com globex-inc-developer"
+          SUB=subresources.kubevirt.io
+          # console: admin and developer yes; analyst and other tenants no
+          expect true  $ALICE get $SUB virtualmachineinstances console acme-corp
+          expect true  $BOB   get $SUB virtualmachineinstances console acme-corp
+          expect false $CAROL get $SUB virtualmachineinstances console acme-corp
+          expect false $EVE   get $SUB virtualmachineinstances console acme-corp
+          # read: every tier in the own tenant, nobody across tenants
+          expect true  $BOB   list kubevirt.io virtualmachines "" acme-corp
+          expect true  $CAROL list kubevirt.io virtualmachines "" acme-corp
+          expect true  $CAROL get  kubevirt.io virtualmachineinstances "" acme-corp
+          expect false $EVE   list kubevirt.io virtualmachines "" acme-corp
+          # tenants order VMs through the platform, never by creating or deleting them directly
+          expect false $ALICE create kubevirt.io virtualmachines "" acme-corp
+          expect false $BOB   delete kubevirt.io virtualmachines "" acme-corp
+          exit $fail
