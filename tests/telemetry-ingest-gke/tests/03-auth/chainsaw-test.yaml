@@ -1,0 +1,19 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: telemetry-ingest-auth-gke
+spec:
+  cluster: hub
+  description: >
+    A request without a valid key is refused (401), ingest and read keys are
+    not interchangeable, a read key opens only its own project's path (403
+    otherwise, even for a project that does not exist), and a malformed query
+    is a 400 rather than a 500. Needs no data. The check for another existing
+    project's path is skipped when the deployment has one project.
+  steps:
+  - name: keys and roles are enforced
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS:?run through make validate-telemetry-ingest-gke}/checks.sh" check_auth

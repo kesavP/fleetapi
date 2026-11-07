@@ -46,3 +46,7 @@ deploy/platform-mvp/kind/*-auth/
 *.jwt
 *.p12
 *.pfx
+# telemetry-ui (Node runs in Docker; modules live in a volume, but guard against a local install)
+node_modules/
+platform-mvp/telemetry-ui/dist/
+coverage/

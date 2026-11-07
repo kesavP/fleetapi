@@ -1,0 +1,94 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: telemetry-ingest-deployed
+spec:
+  cluster: hub
+  description: >
+    The hub runs ClickHouse and telemetry-ingest, the generated keys exist for
+    every fleet cluster, and a pod on a spoke can reach the service over the
+    NodePort (the kind lab's address, http://hub-control-plane:30081, which is
+    what a spoke's node-agent is given). Deploy with TELEMETRY_HUB=true, which
+    makes the Service a NodePort.
+  steps:
+  - name: ClickHouse is up
+    try:
+    - assert:
+        timeout: 3m
+        resource:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: telemetry-clickhouse
+            namespace: monitoring
+          status:
+            readyReplicas: 1
+  - name: telemetry-ingest is available
+    try:
+    - assert:
+        timeout: 3m
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: telemetry-ingest
+            namespace: monitoring
+          status:
+            availableReplicas: 1
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: telemetry-ingest
+            namespace: monitoring
+  - name: every fleet cluster has an ingest key and a read key
+    try:
+    - script:
+        timeout: 1m
+        content: |
+          set -eu
+          for p in us eu; do
+            for role in ingest read; do
+              v=$(kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring get secret telemetry-ingest-keys \
+                -o go-template="{{index .data \"$p.$role\"}}" | base64 -d)
+              [ "${#v}" -ge 16 ] || { echo "FAIL: key $p.$role is missing or shorter than 16 characters" >&2; exit 1; }
+            done
+          done
+          echo "ok: ingest and read keys for us and eu"
+  - name: the Service is a NodePort on the pinned ports
+    try:
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: telemetry-ingest
+            namespace: monitoring
+          spec:
+            type: NodePort
+            ports:
+            - name: http
+              port: 80
+              nodePort: 30081
+            - name: otlp-grpc
+              port: 4317
+              nodePort: 30318
+  - name: a pod on the us spoke reaches it over the Docker network
+    cluster: us
+    try:
+    - script:
+        timeout: 3m
+        content: |
+          set -eu
+          # healthz needs no key, so this proves the network path alone; the
+          # second call proves it is telemetry-ingest that answers (it refuses a
+          # request without a key) and not some other listener on that port.
+          out=$(kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_US}" run "ti-reach-$$" --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 --command -- sh -c \
+            'echo healthz=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://hub-control-plane:30081/healthz) \
+             ingest_without_key=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST http://hub-control-plane:30081/v1/metrics)')
+          echo "$out"
+          grep -q "healthz=200" <<<"$out" || { echo "FAIL: /healthz not reachable from the spoke" >&2; exit 1; }
+          grep -q "ingest_without_key=401" <<<"$out" || { echo "FAIL: an unauthenticated ingest was not refused with 401" >&2; exit 1; }
+          echo "ok: a spoke pod reaches telemetry-ingest at hub-control-plane:30081"

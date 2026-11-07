@@ -100,6 +100,90 @@ alertRouter:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { cpu: 100m, memory: 64Mi }
 
+# Telemetry store for the Coroot agents' data (metrics, traces, logs, profiles):
+# receives it from the spokes, keeps it in ClickHouse, serves it per project.
+# Off by default. One project per fleet cluster; the chart generates an ingest
+# key (agents) and a read key (query API) for each into Secret
+# telemetry-ingest-keys (`<cluster>.ingest`, `<cluster>.read`). The image must be
+# built and pushed first (`make build-telemetry-ingest-image push-telemetry-ingest`).
+# Plain HTTP, like the metrics ingest: keep it on the lab's private network.
+telemetryIngest:
+  enabled: false
+  namespace: monitoring
+  image:
+    repository: sojoner/telemetry-ingest
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the distroless `nonroot` user.
+  runAsUser: 65532
+  retention:
+    metrics: 336h
+    traces: 168h
+    logs: 168h
+    profiles: 168h
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  # How the spokes' agents reach the service (it always has the in-cluster name
+  # telemetry-ingest.<namespace>.svc). ClusterIP: this cluster only. NodePort:
+  # the kind lab, where spokes use http://hub-control-plane:<nodePort> over the
+  # Docker network (30080, 30317 and 30909 are taken by Coroot and the metrics
+  # ingest). LoadBalancer: a cloud; use the provider's annotation for an
+  # internal one, for example on GKE
+  #   networking.gke.io/load-balancer-type: "Internal"
+  # and add networking.gke.io/internal-load-balancer-allow-global-access: "true"
+  # if the spoke is in another region. Plain HTTP and one port for both ingest and
+  # the query API: keep it private and restrict who can reach it.
+  service:
+    type: ClusterIP
+    nodePort: 30081
+    grpcNodePort: 30318
+    annotations: {}
+    loadBalancerSourceRanges: []
+  # A ServiceMonitor for the service's /metrics. It needs the Prometheus Operator
+  # CRDs (the kind lab has them); set false on a cluster without them, such as a
+  # plain GKE cluster, or the apply fails on that one object.
+  serviceMonitor:
+    enabled: true
+  # A single replica; the tables are not replicated.
+  clickhouse:
+    image:
+      repository: clickhouse/clickhouse-server
+      tag: "24.8"
+      pullPolicy: IfNotPresent
+    storage: 5Gi
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { cpu: "1", memory: 2Gi }
+
+# The telemetry UI (platform-mvp/telemetry-ui): a static app plus a proxy of the
+# read API, in nginx. Build and push the image first
+# (`make build-telemetry-ui-image push-telemetry-ui`). It holds no key: the user
+# enters a project and its read key in the page. Reach it with
+#   kubectl -n monitoring port-forward svc/telemetry-ui 8081:80
+# or set service.type for a private address, as for telemetryIngest.service.
+# Plain HTTP; the read key crosses it, so keep it private or put TLS in front.
+telemetryUi:
+  enabled: false
+  namespace: monitoring
+  replicas: 1
+  image:
+    repository: sojoner/telemetry-ui
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the nginx-unprivileged image's user.
+  runAsUser: 101
+  # Where /api is proxied (scheme and host, no path). Empty: the telemetry-ingest Service.
+  apiUpstream: ""
+  service:
+    type: ClusterIP
+    nodePort: 30082
+    annotations: {}
+    loadBalancerSourceRanges: []
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+
 # Receives the spokes' pod metrics. Each spoke runs a Prometheus agent that
 # remote-writes here; this proxy is the only way in, so the hub Prometheus is
 # never exposed. Basic auth with a generated credential (kept on upgrades);

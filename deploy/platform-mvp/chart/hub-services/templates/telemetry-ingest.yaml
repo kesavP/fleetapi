@@ -1,0 +1,290 @@
+{{- if .Values.telemetryIngest.enabled }}
+{{- $ns := .Values.telemetryIngest.namespace }}
+{{- $ti := .Values.telemetryIngest }}
+{{- $keys := lookup "v1" "Secret" $ns "telemetry-ingest-keys" }}
+{{- $svc := $ti.service }}
+{{- if not (has $svc.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
+{{- fail (printf "telemetryIngest.service.type %q must be ClusterIP, NodePort or LoadBalancer" $svc.type) }}
+{{- end }}
+{{- if eq $svc.type "NodePort" }}
+{{- range $p := list $svc.nodePort $svc.grpcNodePort }}
+{{- if or (lt (int $p) 30000) (gt (int $p) 32767) }}
+{{- fail (printf "telemetryIngest.service node port %v is outside the NodePort range 30000-32767" $p) }}
+{{- end }}
+{{- end }}
+{{- if eq (int $svc.nodePort) (int $svc.grpcNodePort) }}
+{{- fail "telemetryIngest.service.nodePort and grpcNodePort must differ" }}
+{{- end }}
+{{- end }}
+# Hub-side telemetry store for the Coroot agents' data: receives it from the
+# spokes, keeps it in ClickHouse and serves it per project (one project per
+# fleet cluster). See docs/platform-mvp/20-telemetry-ingest.md.
+#
+# Keys. Each fleet cluster gets an ingest key (its agents send with it) and a
+# read key (the query API). They are generated once and kept on upgrades
+# (`lookup` finds the existing Secret); under `helm template` there is no
+# cluster, so throwaway values are rendered. projects.json is derived from the
+# same keys, so the two can never disagree.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telemetry-ingest-keys
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-ingest
+type: Opaque
+stringData:
+  {{- $projects := list }}
+  {{- range .Values.fleet.clusters }}
+  {{- $ingest := randAlphaNum 32 }}
+  {{- $read := randAlphaNum 32 }}
+  {{- if and $keys $keys.data }}
+  {{- $ingest = index $keys.data (printf "%s.ingest" .name) | default (b64enc $ingest) | b64dec }}
+  {{- $read = index $keys.data (printf "%s.read" .name) | default (b64enc $read) | b64dec }}
+  {{- end }}
+  {{ .name }}.ingest: {{ $ingest | quote }}
+  {{ .name }}.read: {{ $read | quote }}
+  {{- $projects = append $projects (dict "name" .name "ingestKeys" (list $ingest) "readKeys" (list $read)) }}
+  {{- end }}
+  projects.json: {{ dict "projects" $projects | toJson | quote }}
+---
+{{- $chPass := randAlphaNum 24 }}
+{{- $chExisting := lookup "v1" "Secret" $ns "telemetry-clickhouse" }}
+{{- if and $chExisting $chExisting.data }}{{ $chPass = index $chExisting.data "password" | b64dec }}{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telemetry-clickhouse
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-clickhouse
+type: Opaque
+stringData:
+  password: {{ $chPass | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-clickhouse
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-clickhouse
+spec:
+  clusterIP: None
+  selector:
+    app: telemetry-clickhouse
+  ports:
+    - name: native
+      port: 9000
+      targetPort: native
+    - name: http
+      port: 8123
+      targetPort: http
+---
+# One ClickHouse replica: enough for a lab, and the tables are not replicated.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: telemetry-clickhouse
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-clickhouse
+spec:
+  serviceName: telemetry-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-clickhouse
+  template:
+    metadata:
+      labels:
+        app: telemetry-clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: "{{ $ti.clickhouse.image.repository }}:{{ $ti.clickhouse.image.tag }}"
+          imagePullPolicy: {{ $ti.clickhouse.image.pullPolicy }}
+          env:
+            - name: CLICKHOUSE_USER
+              value: telemetry
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-clickhouse
+                  key: password
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          ports:
+            - name: native
+              containerPort: 9000
+            - name: http
+              containerPort: 8123
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          resources:
+            {{- toYaml $ti.clickhouse.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $ti.clickhouse.storage }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: telemetry-ingest
+  namespace: {{ $ns }}
+# The service never calls the Kubernetes API, so it gets no token.
+automountServiceAccountToken: false
+---
+# How the spokes' agents reach the service. Inside this cluster the name
+# telemetry-ingest.<namespace>.svc always works. For other clusters set
+# service.type: NodePort on the kind lab (spokes use
+# http://hub-control-plane:<nodePort>), LoadBalancer on a cloud (with the
+# provider's annotation for an internal one). The query API is on the same port,
+# so whoever can reach the ingest endpoint can also try the read endpoints: the
+# keys are the only protection, and the traffic is plain HTTP. Keep it on a
+# private network, and restrict it with loadBalancerSourceRanges where the
+# provider supports that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ingest
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-ingest
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  selector:
+    app: telemetry-ingest
+  {{- if and (eq $svc.type "LoadBalancer") $svc.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $svc.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      {{- if eq $svc.type "NodePort" }}
+      nodePort: {{ $svc.nodePort }}
+      {{- end }}
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      {{- if eq $svc.type "NodePort" }}
+      nodePort: {{ $svc.grpcNodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ingest
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-ingest
+spec:
+  # The service holds batches in memory until they are inserted; scale it out
+  # only after deciding how a restart should treat the rows in flight.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-ingest
+  template:
+    metadata:
+      labels:
+        app: telemetry-ingest
+    spec:
+      serviceAccountName: telemetry-ingest
+      automountServiceAccountToken: false
+      volumes:
+        - name: projects
+          secret:
+            secretName: telemetry-ingest-keys
+            items:
+              - key: projects.json
+                path: projects.json
+        - name: clickhouse-password
+          secret:
+            secretName: telemetry-clickhouse
+      containers:
+        - name: telemetry-ingest
+          image: "{{ $ti.image.repository }}:{{ $ti.image.tag }}"
+          imagePullPolicy: {{ $ti.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --grpc-listen=:4317
+            - --projects-file=/etc/telemetry/projects/projects.json
+            - --clickhouse-addr=telemetry-clickhouse.{{ $ns }}.svc.cluster.local:9000
+            - --clickhouse-user=telemetry
+            - --clickhouse-password-file=/etc/telemetry/clickhouse/password
+            - --ttl-metrics={{ $ti.retention.metrics }}
+            - --ttl-traces={{ $ti.retention.traces }}
+            - --ttl-logs={{ $ti.retention.logs }}
+            - --ttl-profiles={{ $ti.retention.profiles }}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: otlp-grpc
+              containerPort: 4317
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ $ti.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: projects
+              mountPath: /etc/telemetry/projects
+              readOnly: true
+            - name: clickhouse-password
+              mountPath: /etc/telemetry/clickhouse
+              readOnly: true
+          resources:
+            {{- toYaml $ti.resources | nindent 12 }}
+{{- if $ti.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: telemetry-ingest
+  namespace: {{ $ns }}
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app: telemetry-ingest
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+{{- end }}
+{{- end }}

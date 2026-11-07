@@ -1,0 +1,15 @@
+# Overlay for a spoke running on AKS (real nodes, so the Coroot node-agent's
+# eBPF sees the node's own pid namespace; see docs/platform-mvp/19-coroot-agents.md).
+# Use with: helm upgrade --install spoke ... -f aks-values.yaml
+coroot:
+  enabled: true
+  # Set to the hub Coroot server as seen from this cluster's pods. For a single
+  # cluster that runs its own server (coroot-stage0.sh) use the in-cluster
+  # Service: http://coroot-coroot.coroot:8080
+  corootURL: ""
+  nodeAgentResources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      memory: 1Gi

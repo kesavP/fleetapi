@@ -35,6 +35,25 @@ SPOKE_CHART        ?= deploy/platform-mvp/chart/spoke
 CRDS_CHART         ?= deploy/platform-mvp/chart/crds
 HUBSVC_CHART       ?= deploy/platform-mvp/chart/hub-services
 HELM_TIMEOUT       ?= 15m
+# Extra helm arguments for the hub-services and spoke installs, and how images
+# reach the clusters. The defaults push to DOCKER_REGISTRY; `make deploy-local`
+# loads locally built images into kind instead, with no registry involved.
+HUBSVC_HELM_ARGS   ?=
+SPOKE_HELM_ARGS    ?=
+IMAGE_DELIVERY     ?= push-images-parallel
+
+# Coroot agents on spokes (off unless COROOT_SPOKES lists some, e.g. "us eu").
+# The operator is a separate release because it owns the Coroot CRD, which the
+# spoke chart's Coroot resource needs to exist before it installs.
+COROOT_SPOKES            ?=
+COROOT_OPERATOR_VERSION  ?= 0.10.6
+
+# TELEMETRY_HUB=true runs telemetry-ingest and its ClickHouse on the hub (off by
+# default). `make validate-telemetry-ingest` then tests it with Chainsaw.
+TELEMETRY_HUB            ?= false
+# The kind lab reaches the hub over the Docker network, so the service is a NodePort.
+TELEMETRY_HUB_ARGS       = $(if $(filter true,$(TELEMETRY_HUB)),--set telemetryIngest.enabled=true --set telemetryIngest.service.type=NodePort)
+TI_TEST_DIR              ?= tests/telemetry-ingest
 
 INGRESS_HOST       ?= bm4080.taildf7067.ts.net
 GRAFANA_URL        ?= http://$(INGRESS_HOST)
@@ -58,6 +77,8 @@ DAP_DIR            ?= platform-mvp/dex-auth-plugin
 VMBC_DIR           ?= platform-mvp/vm-binding-controller
 VMSG_DIR           ?= platform-mvp/vmset-gateway
 AR_DIR             ?= platform-mvp/alert-router
+TI_DIR             ?= platform-mvp/telemetry-ingest
+UI_DIR             ?= platform-mvp/telemetry-ui
 
 BC_IMAGE           ?= $(DOCKER_REGISTRY)/binding-controller:$(IMAGE_TAG)
 WO_IMAGE           ?= $(DOCKER_REGISTRY)/widget-operator:$(IMAGE_TAG)
@@ -66,6 +87,8 @@ DAP_IMAGE          ?= $(DOCKER_REGISTRY)/dex-auth-plugin:$(IMAGE_TAG)
 VMBC_IMAGE         ?= $(DOCKER_REGISTRY)/vm-binding-controller:$(IMAGE_TAG)
 VMSG_IMAGE         ?= $(DOCKER_REGISTRY)/vmset-gateway:$(IMAGE_TAG)
 AR_IMAGE           ?= $(DOCKER_REGISTRY)/alert-router:$(IMAGE_TAG)
+TI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ingest:$(IMAGE_TAG)
+UI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ui:$(IMAGE_TAG)
 
 CRDS_DIR           ?= deploy/platform-mvp/crds
 OUT_DIR            ?= bin
@@ -119,8 +142,8 @@ help:
 	@echo "  make verify-all         Full clean-room: clean → deploy → validate → deploy-cd"
 
 # ── Test ─────────────────────────────────────────────────────────────────────
-.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-race test-cover
-test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar
+.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
+test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti
 	@echo "==> All unit tests passed"
 
 test-root:
@@ -147,6 +170,48 @@ test-vmsg:
 test-ar:
 	cd $(AR_DIR) && go test ./... -count=1
 
+test-ti:
+	cd $(TI_DIR) && go test ./... -count=1
+
+# Against a real ClickHouse started for the run (needs Docker, ~1 min).
+test-ti-integration:
+	./hack/platform-mvp/test-telemetry-ingest.sh
+
+# The hub chart's Service for telemetry-ingest, and how spokes reach it (rendering only; needs Docker).
+test-ti-chart:
+	./hack/platform-mvp/test-telemetry-ingest-chart.sh
+
+# The telemetry UI (Node runs in Docker, so the host needs neither Node nor npm).
+UI_NODE ?= node:24-alpine
+UI_RUN   = docker run --rm -v "$(CURDIR)/$(UI_DIR)":/app -v telemetry-ui-node-modules:/app/node_modules -w /app $(UI_NODE)
+ui-install:
+	$(UI_RUN) npm ci
+
+test-ui: ui-install
+	$(UI_RUN) sh -c 'npm run lint && npm test && npm run build'
+
+# Dev server on :5173, proxying /api to UI_API (default: a port-forward of telemetry-ingest on :8080).
+UI_API ?= http://host.docker.internal:8080
+ui-dev: ui-install
+	docker run --rm -it -p 5173:5173 --add-host=host.docker.internal:host-gateway -e API_TARGET=$(UI_API) \
+		-v "$(CURDIR)/$(UI_DIR)":/app -v telemetry-ui-node-modules:/app/node_modules -w /app $(UI_NODE) npm run dev -- --host 0.0.0.0
+
+# The hub chart's telemetry-ui template (rendering only; needs Docker).
+test-ui-chart:
+	./hack/platform-mvp/test-telemetry-ui-chart.sh
+
+# The built image against a stub API: proxying, GET-only, blocked paths, headers, read-only root.
+test-ui-image:
+	./hack/platform-mvp/test-telemetry-ui-image.sh
+
+# The key-delivery script, against a stub kubectl (no cluster or Docker needed).
+test-telemetry-credentials:
+	./hack/platform-mvp/test-telemetry-credentials.sh
+
+# The service map backend, against a stub of the read API and a fixture cluster (python3 only).
+test-servicemap:
+	python3 -W error::ResourceWarning -m unittest hack/platform-mvp/servicemap/test_server.py
+
 # Unit-tests the VmSet alert rules with promtool (needs Docker).
 test-alerts:
 	./hack/platform-mvp/test-vmset-alerts.sh
@@ -167,6 +232,14 @@ test-spoke-probe:
 test-spoke-metrics:
 	./hack/platform-mvp/test-spoke-metrics.sh
 
+# Coroot agent wiring: chart render, CRD validation on a real API server.
+test-coroot-agents:
+	./hack/platform-mvp/test-coroot-agents.sh
+
+# The spoke chart's node-agent DaemonSet: render checks plus a real API server (needs Docker).
+test-node-agent-chart:
+	./hack/platform-mvp/test-node-agent-chart.sh
+
 # Copies the hub's metrics-ingest credential to every spoke, where the metrics
 # agent reads it. Run after the hub-services chart is installed and before
 # enabling metricsAgent on the spokes.
@@ -174,6 +247,27 @@ test-spoke-metrics:
 spoke-metrics-credentials:
 	@for s in $(SPOKES); do \
 		./hack/platform-mvp/copy-metrics-credentials.sh kind-$$s kind-$(KIND_HUB) || exit 1; \
+	done
+
+# Copies each spoke's telemetry-ingest key from the hub. Run after the hub's
+# telemetry-ingest is deployed (TELEMETRY_HUB=true) and before installing the
+# spokes with nodeAgent.enabled. TELEMETRY_SPOKES defaults to every spoke; add
+# RESTART=1 to restart running agents when a key changes.
+TELEMETRY_SPOKES ?= $(SPOKES)
+.PHONY: spoke-telemetry-credentials
+spoke-telemetry-credentials:
+	@for s in $(TELEMETRY_SPOKES); do \
+		./hack/platform-mvp/copy-telemetry-credentials.sh $$s kind-$$s kind-$(KIND_HUB) || exit 1; \
+	done
+
+# Copies each Coroot spoke's API key from the hub's Coroot server. The hub
+# Coroot server was removed from the hub chart, so there is nothing to copy from
+# any more: this target only works against a server you run yourself. For the
+# telemetry-ingest path use spoke-telemetry-credentials above.
+.PHONY: spoke-coroot-credentials
+spoke-coroot-credentials:
+	@for s in $(COROOT_SPOKES); do \
+		./hack/platform-mvp/copy-coroot-credentials.sh $$s kind-$$s kind-$(KIND_HUB) || exit 1; \
 	done
 
 test-race:
@@ -185,6 +279,7 @@ test-race:
 	cd $(VMBC_DIR) && go test -race ./... -count=1
 	cd $(VMSG_DIR) && go test -race ./... -count=1
 	cd $(AR_DIR) && go test -race ./... -count=1
+	cd $(TI_DIR) && go test -race ./... -count=1
 
 test-cover:
 	go test -coverprofile=coverage-root.out ./...
@@ -204,6 +299,7 @@ lint:
 	cd $(VMBC_DIR) && go vet ./...
 	cd $(VMSG_DIR) && go vet ./...
 	cd $(AR_DIR) && go vet ./...
+	cd $(TI_DIR) && go vet ./...
 	@if [ -n "$$(gofmt -l .)" ]; then \
 		echo "ERROR: files not formatted:"; \
 		gofmt -l .; \
@@ -218,6 +314,7 @@ lint-fix:
 	cd $(VMBC_DIR) && gofmt -w .
 	cd $(VMSG_DIR) && gofmt -w .
 	cd $(AR_DIR) && gofmt -w .
+	cd $(TI_DIR) && gofmt -w .
 	go vet ./...
 	cd $(BC_DIR) && go vet ./...
 	cd $(WO_DIR) && go vet ./...
@@ -232,9 +329,9 @@ build-bc:
 	cd $(BC_DIR) && go build -o ../../$(BC_BIN) .
 
 # ── Docker images (build only) ───────────────────────────────────────────────
-.PHONY: build-images build-bc-image build-wo-image build-ov-image build-dap-image build-vmbc-image build-vmsg-image build-alert-router-image
+.PHONY: build-images build-bc-image build-wo-image build-ov-image build-dap-image build-vmbc-image build-vmsg-image build-alert-router-image build-telemetry-ingest-image
 
-build-images: build-bc-image build-wo-image build-ov-image build-dap-image build-vmbc-image build-vmsg-image build-alert-router-image
+build-images: build-bc-image build-wo-image build-ov-image build-dap-image build-vmbc-image build-vmsg-image build-alert-router-image build-telemetry-ingest-image
 
 build-bc-image:
 	@echo "==> Building $(BC_IMAGE)"
@@ -265,6 +362,16 @@ build-alert-router-image:
 	@echo "==> Building $(AR_IMAGE)"
 	docker build -t $(AR_IMAGE) $(AR_DIR)
 
+build-telemetry-ingest-image:
+	@echo "==> Building $(TI_IMAGE)"
+	docker build -t $(TI_IMAGE) $(TI_DIR)
+
+# Not part of build-images: the UI is opt-in, like the service it reads.
+.PHONY: build-telemetry-ui-image push-telemetry-ui
+build-telemetry-ui-image:
+	@echo "==> Building $(UI_IMAGE)"
+	docker build -t $(UI_IMAGE) $(UI_DIR)
+
 # Build all images in parallel
 build-images-parallel:
 	@echo "==> Building all images in parallel"
@@ -275,13 +382,14 @@ build-images-parallel:
 	$(MAKE) --no-print-directory build-vmbc-image & \
 	$(MAKE) --no-print-directory build-vmsg-image & \
 	$(MAKE) --no-print-directory build-alert-router-image & \
+	$(MAKE) --no-print-directory build-telemetry-ingest-image & \
 	wait
 	@echo "==> All images built"
 
 # ── Docker push (parallel by default) ────────────────────────────────────────
-.PHONY: push-images push-bc push-wo push-ov push-dap push-vmbc push-vmsg push-alert-router
+.PHONY: push-images push-bc push-wo push-ov push-dap push-vmbc push-vmsg push-alert-router push-telemetry-ingest
 
-push-images: push-bc push-wo push-ov push-dap push-vmbc push-vmsg push-alert-router
+push-images: push-bc push-wo push-ov push-dap push-vmbc push-vmsg push-alert-router push-telemetry-ingest
 
 push-bc:
 	docker push $(BC_IMAGE)
@@ -297,6 +405,10 @@ push-vmsg:
 	docker push $(VMSG_IMAGE)
 push-alert-router:
 	docker push $(AR_IMAGE)
+push-telemetry-ingest:
+	docker push $(TI_IMAGE)
+push-telemetry-ui:
+	docker push $(UI_IMAGE)
 
 push-images-parallel:
 	@echo "==> Pushing all images to $(DOCKER_REGISTRY)"
@@ -307,6 +419,7 @@ push-images-parallel:
 	docker push $(VMBC_IMAGE) & \
 	docker push $(VMSG_IMAGE) & \
 	docker push $(AR_IMAGE) & \
+	docker push $(TI_IMAGE) & \
 	wait
 	@echo "==> All images pushed"
 
@@ -420,12 +533,27 @@ clusters:
 .PHONY: deploy deploy-wave1 deploy-wave2 deploy-wave3 deploy-wave4
 .PHONY: deploy-us deploy-hub  # legacy aliases
 
+# Everything on kind with no registry: images are built locally and loaded
+# into the clusters, and the charts are told to use them.
+.PHONY: deploy-local kind-load-images
+deploy-local:
+	$(MAKE) deploy IMAGE_DELIVERY=kind-load-images \
+		HUBSVC_HELM_ARGS="-f $(HUBSVC_CHART)/local-images-values.yaml $(HUBSVC_HELM_ARGS)" \
+		SPOKE_HELM_ARGS="-f $(SPOKE_CHART)/local-images-values.yaml $(SPOKE_HELM_ARGS)"
+
+# Hub images go to the hub, spoke images to each spoke.
+kind-load-images:
+	./hack/platform-mvp/kind-load-images.sh $(KIND_HUB) $(BC_IMAGE) $(VMBC_IMAGE) $(VMSG_IMAGE) $(AR_IMAGE) $(TI_IMAGE) $(DAP_IMAGE)
+	@for s in $(SPOKES); do \
+		./hack/platform-mvp/kind-load-images.sh $$s $(WO_IMAGE) $(OV_IMAGE) || exit 1; \
+	done
+
 deploy: crds
 	@echo "==> Building images and creating clusters in parallel"
 	$(MAKE) build-images-parallel & \
 	$(MAKE) clusters & \
 	wait
-	$(MAKE) push-images-parallel
+	$(MAKE) $(IMAGE_DELIVERY)
 	@echo "==> Wave 1: CRDs on hub + us"
 	$(MAKE) deploy-wave1
 	@echo "==> Wave 2 (infra on hub) + Wave 4 (spokes) in parallel"
@@ -503,7 +631,7 @@ deploy-wave3:
 	kubectl --context kind-$(KIND_HUB) create namespace kro-system 2>/dev/null || true
 	helm upgrade --install hub-services $(HUBSVC_CHART) \
 		-n default --create-namespace --timeout $(HELM_TIMEOUT) \
-		-f $(HUBSVC_CHART)/e2e-values.yaml \
+		-f $(HUBSVC_CHART)/e2e-values.yaml $(TELEMETRY_HUB_ARGS) $(HUBSVC_HELM_ARGS) \
 		--kube-context kind-$(KIND_HUB)
 	@echo "  Creating secrets..."
 	@for s in $(SPOKES); do \
@@ -532,7 +660,15 @@ deploy-wave4:
 			kubectl --context kind-$$s apply -f $(CRDS_DIR)/kubevirt-operator.yaml > /dev/null || exit 1; \
 			kubectl --context kind-$$s wait --for=condition=Established crd/kubevirts.kubevirt.io --timeout=60s || exit 1; \
 		fi; \
-		helm upgrade --install $$s $(SPOKE_CHART) -f $(SPOKE_CHART)/values-$$s.yaml \
+		if echo " $(COROOT_SPOKES) " | grep -q " $$s "; then \
+			echo "  Installing Coroot operator $(COROOT_OPERATOR_VERSION) on $$s"; \
+			kubectl --context kind-$$s create namespace coroot --dry-run=client -o yaml | kubectl --context kind-$$s apply -f - || exit 1; \
+			kubectl --context kind-$$s label namespace coroot pod-security.kubernetes.io/enforce=privileged --overwrite || exit 1; \
+			helm repo add coroot https://coroot.github.io/helm-charts > /dev/null || exit 1; \
+			helm upgrade --install coroot-operator coroot/coroot-operator --version $(COROOT_OPERATOR_VERSION) \
+				-n coroot --wait --timeout $(HELM_TIMEOUT) --kube-context kind-$$s || exit 1; \
+		fi; \
+		helm upgrade --install $$s $(SPOKE_CHART) -f $(SPOKE_CHART)/values-$$s.yaml $(SPOKE_HELM_ARGS) \
 			-n default --create-namespace --wait --timeout $(HELM_TIMEOUT) \
 			--kube-context kind-$$s || exit 1; \
 		kubectl --context kind-$$s -n default rollout status deployment/widget-operator --timeout=60s || exit 1; \
@@ -599,6 +735,36 @@ validate: ensure-spoke-auth-config
 	@for s in $(SPOKES); do kind get kubeconfig --name $$s > $(CHAINSAW_DIR)/kubeconfig-$$s-internal || exit 1; done
 	cd $(CHAINSAW_DIR) && chainsaw test . --test-dir tests --fail-fast=false \
 		--report-format JSON --report-name $(CHAINSAW_REPORT)
+
+# Chainsaw tests for telemetry-ingest. Separate from `validate` because the
+# service is opt-in: deploy it first with `make deploy-local TELEMETRY_HUB=true`
+# (or `make deploy-wave3 TELEMETRY_HUB=true` on an existing hub). TI_HELPERS
+# tells the tests where their helper scripts are.
+.PHONY: validate-telemetry-ingest
+validate-telemetry-ingest:
+	@echo "==> Running the telemetry-ingest Chainsaw tests"
+	kind get kubeconfig --name $(KIND_HUB) > $(TI_TEST_DIR)/kubeconfig-hub
+	@for s in $(SPOKES); do kind get kubeconfig --name $$s > $(TI_TEST_DIR)/kubeconfig-$$s-internal || exit 1; done
+	cd $(TI_TEST_DIR) && TI_HELPERS="$(CURDIR)/$(TI_TEST_DIR)/helpers" chainsaw test . --test-dir tests \
+		--report-format JSON --report-name chainsaw-report-telemetry-ingest
+
+# The same checks against a GKE cluster (or any single cluster that runs the
+# service and the node-agent): one project, ClusterIP, the real node-agent.
+# GKE_CONTEXT is the kubectl context (kubectl config get-contexts); TI_GKE_PROJECT
+# is the project named when the service was installed (default gke).
+# Writes test data into that project under chainsaw-prefixed names. Needs the
+# Chainsaw CLI, kubectl, jq, curl and python3.
+GKE_CONTEXT       ?=
+TI_GKE_PROJECT    ?= gke
+TI_GKE_TEST_DIR   ?= tests/telemetry-ingest-gke
+.PHONY: validate-telemetry-ingest-gke
+validate-telemetry-ingest-gke:
+	@test -n "$(GKE_CONTEXT)" || { echo "set GKE_CONTEXT=<kubectl context of the cluster>; kubectl config get-contexts lists them" >&2; exit 1; }
+	@case "$(GKE_CONTEXT)" in kind-*) echo "GKE_CONTEXT $(GKE_CONTEXT) is a kind cluster; use validate-telemetry-ingest for the lab" >&2; exit 1;; esac
+	@echo "==> Running the telemetry-ingest Chainsaw tests against $(GKE_CONTEXT), project $(TI_GKE_PROJECT)"
+	umask 077 && kubectl config view --minify --flatten --context "$(GKE_CONTEXT)" > $(TI_GKE_TEST_DIR)/kubeconfig-hub
+	cd $(TI_GKE_TEST_DIR) && TI_HELPERS="$(CURDIR)/tests/telemetry-ingest/helpers" TI_PROJECT="$(TI_GKE_PROJECT)" TI_OTHER_PROJECT="" \
+		chainsaw test . --test-dir tests --report-format JSON --report-name chainsaw-report-telemetry-ingest-gke
 
 # ── Grafana ──────────────────────────────────────────────────────────────────
 .PHONY: grafana grafana-url

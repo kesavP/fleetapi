@@ -113,23 +113,7 @@ kc apply -f /tmp/ingest.yaml >/dev/null || fail "the rendered ingest manifests w
 kc -n monitoring rollout status deployment/metrics-ingest --timeout=120s >/dev/null || { kc -n monitoring describe pods >&2; fail "metrics-ingest did not become ready"; }
 echo "ok: metrics-ingest runs with its read-only, non-root security context"
 
-echo "== the spoke gets the hub's credential through the real copy script"
-cat > "$work/kubectl" <<WRAP
-#!/usr/bin/env bash
-# Stands in for kubectl with two contexts: both map to the one k3s cluster.
-args=()
-while [ \$# -gt 0 ]; do
-  if [ "\$1" = --context ]; then shift 2; else args+=("\$1"); shift; fi
-done
-exec docker exec -i "$k3s" kubectl "\${args[@]}"
-WRAP
-chmod 755 "$work/kubectl"
-KUBECTL="$work/kubectl" "$root/hack/platform-mvp/copy-metrics-credentials.sh" spoke-ctx hub-ctx >/dev/null \
-  || fail "copy-metrics-credentials.sh failed"
-kc -n default get secret hub-metrics-credentials >/dev/null || fail "the spoke secret was not created"
-echo "ok: the credential reached the spoke"
-
-echo "== spoke side: kube-state-metrics and the agent, plus two workloads"
+echo "== spoke side, installed before the hub's credential exists (the order make deploy uses)"
 docker cp "$work/spoke.yaml" "$k3s":/tmp/spoke.yaml
 kc apply -f /tmp/spoke.yaml >/dev/null || fail "the rendered spoke manifests were rejected"
 kc create namespace acme-corp >/dev/null
@@ -149,13 +133,32 @@ spec:
   containers:
     - {name: c, image: $busybox_image, imagePullPolicy: IfNotPresent, command: [sleep, "3600"]}
 WORKLOADS
-kc -n default rollout status deployment/metrics-agent --timeout=120s >/dev/null || { kc -n default describe pods >&2; fail "the agent did not become ready"; }
+kc -n default rollout status deployment/metrics-agent --timeout=120s >/dev/null || { kc -n default describe pods >&2; fail "the agent must start even though its credential Secret does not exist yet"; }
 kc -n default rollout status deployment/kube-state-metrics --timeout=120s >/dev/null || {
   kc -n default get events --sort-by=.lastTimestamp 2>&1 | tail -8 >&2
   kc -n default logs deployment/kube-state-metrics 2>&1 | tail -5 >&2
   fail "kube-state-metrics did not become ready"
 }
-echo "ok: the agent and kube-state-metrics run"
+echo "ok: the agent and kube-state-metrics are ready without the credential"
+sleep 15
+[ -z "$(query 'kube_pod_info{cluster="test"}')" ] || fail "nothing should arrive before the credential exists"
+echo "ok: nothing is accepted before the credential exists"
+
+echo "== the credential is copied afterwards, through the real copy script"
+cat > "$work/kubectl" <<WRAP
+#!/usr/bin/env bash
+# Stands in for kubectl with two contexts: both map to the one k3s cluster.
+args=()
+while [ \$# -gt 0 ]; do
+  if [ "\$1" = --context ]; then shift 2; else args+=("\$1"); shift; fi
+done
+exec docker exec -i "$k3s" kubectl "\${args[@]}"
+WRAP
+chmod 755 "$work/kubectl"
+KUBECTL="$work/kubectl" "$root/hack/platform-mvp/copy-metrics-credentials.sh" spoke-ctx hub-ctx >/dev/null \
+  || fail "copy-metrics-credentials.sh failed"
+kc -n default get secret hub-metrics-credentials >/dev/null || fail "the spoke secret was not created"
+echo "ok: the credential reached the spoke; the running agent must now start sending"
 
 echo "== pod metrics arrive at the hub, labelled with the cluster"
 wait_for "pod state from the spoke carries cluster=test" 'kube_pod_info{cluster="test",pod="crasher"}'

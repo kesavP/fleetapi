@@ -127,3 +127,69 @@ vmBindingControllerRBAC:
   enabled: false
   hubIdentity: "hub:system:serviceaccount:default:vm-binding-controller"
   extraNamespaces: [default]
+
+# Coroot agents (service map, eBPF telemetry) reporting to a Coroot server on
+# the hub. The Coroot operator must already be running in `namespace` (the
+# Makefile's coroot-operator target installs it); this chart only declares the
+# agents-only Coroot resource it acts on. Off by default.
+coroot:
+  enabled: false
+  namespace: coroot
+  # Where the agents send telemetry; must be reachable from this spoke's pods.
+  corootURL: ""
+  tlsSkipVerify: false
+  # Secret in `namespace` holding this spoke's API key (one Coroot project per
+  # spoke). Copied from the hub by hack/platform-mvp/copy-coroot-credentials.sh.
+  apiKeySecret:
+    name: hub-coroot-credentials
+    key: apiKey
+  # Passed through to the operator's nodeAgent.resources.
+  nodeAgentResources: {}
+
+# Coroot's node-agent as a plain DaemonSet, pushing eBPF telemetry (metrics,
+# traces, logs, profiles) to the hub's telemetry-ingest. Unlike `coroot` above
+# it needs no Coroot operator, CRD or Helm chart. Off by default; setting both
+# `coroot.enabled` and this is refused. See docs/platform-mvp/20-telemetry-ingest.md.
+nodeAgent:
+  enabled: false
+  # The namespace must exist before the chart is installed, because the key
+  # Secret has to be created in it first. If the cluster enforces Pod Security
+  # Admission, label it pod-security.kubernetes.io/enforce=privileged (the agent
+  # is privileged); createNamespace=true has the chart create it with that label.
+  namespace: telemetry-agent
+  createNamespace: false
+  # The hub telemetry-ingest, as reachable from this spoke's pods, e.g.
+  # http://hub-control-plane:30081. The agent appends /v1/metrics and the rest.
+  collectorURL: ""
+  tlsSkipVerify: false
+  # For an https hub with a private CA: a Secret in `namespace` holding the
+  # certificate under `key`.
+  caSecret:
+    name: ""
+    key: ca.crt
+  # This cluster's ingest key (`<cluster>.ingest` in the hub's Secret
+  # telemetry-ingest-keys), in a Secret in `namespace`. Never set in values.
+  apiKeySecret:
+    name: hub-telemetry-credentials
+    key: apiKey
+  image:
+    repository: ghcr.io/coroot/coroot-node-agent
+    # No default: pin a version you have tested, or your own build.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # On-disk buffer for metrics the hub cannot accept; the oldest batch goes
+  # first when it is full. The volume limit must be larger.
+  spoolSize: 500MB
+  spoolVolumeLimit: 1Gi
+  # Requests only: the agent's real footprint depends on how busy a node is, so
+  # set limits after measuring it on your own nodes.
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+  nodeSelector:
+    kubernetes.io/os: linux
+  # Every node, tainted ones included, as the agent's own manifest does.
+  tolerations:
+    - operator: Exists
+  # Extra agent flags and environment, e.g. --container-denylist.
+  extraArgs: []
+  extraEnv: []

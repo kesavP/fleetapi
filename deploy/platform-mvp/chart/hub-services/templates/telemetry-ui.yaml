@@ -1,0 +1,112 @@
+{{- if .Values.telemetryUi.enabled }}
+{{- $ui := .Values.telemetryUi }}
+{{- $ns := $ui.namespace }}
+{{- if not (has $ui.service.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
+{{- fail (printf "telemetryUi.service.type %q must be ClusterIP, NodePort or LoadBalancer" $ui.service.type) }}
+{{- end }}
+{{- if and (eq $ui.service.type "NodePort") (or (lt (int $ui.service.nodePort) 30000) (gt (int $ui.service.nodePort) 32767)) }}
+{{- fail (printf "telemetryUi.service.nodePort %v is outside the NodePort range 30000-32767" $ui.service.nodePort) }}
+{{- end }}
+# The telemetry UI: static files and a same-origin proxy of the read API only
+# (GET; the ingest endpoints are not reachable through it). The user types a
+# project and its read key into the page; the key lives in that tab's
+# sessionStorage. Nothing here holds a key.
+# See platform-mvp/telemetry-ui/README.md.
+#
+# Plain HTTP, like the service behind it: the read key crosses this hop in a
+# header, so keep it on a private network or put TLS in front before exposing it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ui
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-ui
+  {{- with $ui.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $ui.service.type }}
+  selector:
+    app: telemetry-ui
+  {{- if eq $ui.service.type "LoadBalancer" }}
+  {{- with $ui.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      {{- if eq $ui.service.type "NodePort" }}
+      nodePort: {{ $ui.service.nodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ui
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-ui
+spec:
+  replicas: {{ $ui.replicas }}
+  selector:
+    matchLabels:
+      app: telemetry-ui
+  template:
+    metadata:
+      labels:
+        app: telemetry-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Makes the emptyDir volumes below writable by the image's user.
+        fsGroup: {{ $ui.runAsUser }}
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # nginx writes its rendered config, pid file and temp files at start-up; the root filesystem is read-only.
+        - name: conf
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      containers:
+        - name: telemetry-ui
+          image: "{{ $ui.image.repository }}:{{ $ui.image.tag }}"
+          imagePullPolicy: {{ $ui.image.pullPolicy }}
+          env:
+            - name: API_UPSTREAM
+              value: {{ default (printf "http://telemetry-ingest.%s.svc.cluster.local" $.Values.telemetryIngest.namespace) $ui.apiUpstream | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ $ui.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+          resources:
+            {{- toYaml $ui.resources | nindent 12 }}
+{{- end }}

@@ -1,0 +1,56 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: telemetry-ingest-deployed-gke
+spec:
+  cluster: hub
+  description: >
+    ClickHouse and telemetry-ingest run in the cluster, the generated keys exist
+    for the project under test (TI_PROJECT), and the service answers its
+    readiness probe, which it only does once it has reached ClickHouse and
+    applied the schema.
+  steps:
+  - name: ClickHouse is up
+    try:
+    - assert:
+        timeout: 3m
+        resource:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: telemetry-clickhouse
+            namespace: monitoring
+          status:
+            readyReplicas: 1
+  - name: telemetry-ingest is available
+    try:
+    - assert:
+        timeout: 3m
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: telemetry-ingest
+            namespace: monitoring
+          status:
+            availableReplicas: 1
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: telemetry-ingest
+            namespace: monitoring
+  - name: the project has an ingest key and a read key
+    try:
+    - script:
+        timeout: 1m
+        content: |
+          set -eu
+          p="${TI_PROJECT:?run through make validate-telemetry-ingest-gke}"
+          for role in ingest read; do
+            v=$(kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring get secret telemetry-ingest-keys \
+              -o go-template="{{index .data \"$p.$role\"}}" | base64 -d)
+            [ "${#v}" -ge 16 ] || { echo "FAIL: key $p.$role is missing or shorter than 16 characters (projects in the Secret: $(kubectl --kubeconfig "${CHAINSAW_KUBECONFIG_HUB}" -n monitoring get secret telemetry-ingest-keys -o json | python3 -c 'import json,sys; print(sorted({k.rsplit(".",1)[0] for k in json.load(sys.stdin)["data"] if k != "projects.json"}))'))" >&2; exit 1; }
+          done
+          echo "ok: ingest and read keys for project $p"

@@ -1,0 +1,7 @@
+# Sourced by the nginx image's entrypoint before it renders the templates. It exports the name servers
+# from /etc/resolv.conf as NGINX_RESOLVER, because nginx needs one named in its config to look the API up
+# when a request arrives. (IPv6 addresses need brackets.) 127.0.0.11 is Docker's embedded DNS, for when
+# the file names none.
+NGINX_RESOLVER=$(awk '$1 == "nameserver" { printf "%s ", ($2 ~ /:/ ? "[" $2 "]" : $2) }' /etc/resolv.conf)
+NGINX_RESOLVER=${NGINX_RESOLVER:-127.0.0.11}
+export NGINX_RESOLVER

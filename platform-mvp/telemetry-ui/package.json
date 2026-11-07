@@ -1,0 +1,32 @@
+{
+  "name": "telemetry-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A browser UI for the telemetry-ingest read API: metrics, traces, logs, profiles and the service map.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "vue": "^3.5.45",
+    "vue-router": "^5.4.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.5.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-vue": "^10.12.0",
+    "globals": "^17.14.0",
+    "jsdom": "^31.0.0",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  }
+}

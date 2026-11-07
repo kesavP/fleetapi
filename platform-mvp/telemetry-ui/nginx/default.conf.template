@@ -1,0 +1,62 @@
+# Rendered when the container starts, by the nginx image's entrypoint (envsubst), from two variables:
+#   ${API_UPSTREAM}    where /api goes: scheme and host, no path (default http://telemetry-ingest)
+#   ${NGINX_RESOLVER}  the name servers, from /etc/resolv.conf (see 05-resolver.envsh)
+server {
+    listen 8080;
+    server_name _;
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # The API is looked up when a request arrives, not at start-up. With a name in proxy_pass nginx resolves
+    # it once at start and refuses to start if it cannot: the UI would crash-loop until the API existed.
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
+    set $api ${API_UPSTREAM};
+
+    client_max_body_size 1k;   # the UI only reads
+    gzip on;
+    gzip_proxied any;
+    gzip_min_length 512;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # The read API, and nothing else of the service. GET only: the UI never writes. The key arrives in the
+    # X-API-Key header and goes through untouched; it is not in the URL, so the access log never sees it.
+    location ^~ /api/v1/projects/ {
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 405;
+        }
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        proxy_pass $api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+
+    # Anything else under /api, and the ingest endpoints the agents use, are not exposed through the UI.
+    location ^~ /api/ { return 404; }
+    location ^~ /v1/ { return 404; }
+
+    # Built files are named by their content, so they can be cached for good.
+    location ^~ /assets/ {
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # The app itself. Unknown paths get index.html so the router can handle them. index.html is never cached,
+    # or a stale copy would point at assets that a newer build has replaced.
+    location / {
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        try_files $uri /index.html;
+    }
+}

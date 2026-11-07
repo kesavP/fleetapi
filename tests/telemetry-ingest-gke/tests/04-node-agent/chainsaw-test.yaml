@@ -1,0 +1,30 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: telemetry-ingest-node-agent-gke
+spec:
+  cluster: hub
+  description: >
+    The real node-agent, not test payloads: the DaemonSet runs on every node,
+    containers are attributed to pods (/k8s/<namespace>/<pod>/<container>), every
+    node reports container metrics, the data is recent, and the service dropped
+    nothing. Needs the node-agent installed in the cluster (namespace
+    telemetry-agent). Traces, logs and profiles depend on what the cluster runs,
+    so they are reported, not required.
+  steps:
+  - name: the DaemonSet is ready on every node
+    try:
+    - assert:
+        timeout: 3m
+        resource:
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: node-agent
+            namespace: telemetry-agent
+  - name: the agents' data is stored and readable
+    try:
+    - script:
+        timeout: 5m
+        content: |
+          bash "${TI_HELPERS:?run through make validate-telemetry-ingest-gke}/checks.sh" check_node_agent

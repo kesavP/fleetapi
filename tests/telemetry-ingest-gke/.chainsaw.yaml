@@ -1,0 +1,26 @@
+# Chainsaw configuration for running the telemetry-ingest tests against a GKE
+# cluster (or any single cluster that runs the service and the node-agent).
+# `make validate-telemetry-ingest-gke GKE_CONTEXT=<context>` writes ./kubeconfig-hub
+# from that context. The cluster is named `hub` because that is what the shared
+# helpers (tests/telemetry-ingest/helpers) call the cluster that runs the service.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: telemetry-ingest-gke
+spec:
+  timeouts:
+    apply: 30s
+    assert: 60s
+    cleanup: 30s
+    delete: 30s
+    error: 10s
+    exec: 5m
+  failFast: true
+  parallel: 1
+  skipDelete: false
+  reportFormat: JSON
+  reportName: chainsaw-report-telemetry-ingest-gke
+  fullName: true
+  clusters:
+    hub:
+      kubeconfig: ./kubeconfig-hub

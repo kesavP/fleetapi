@@ -1,0 +1,138 @@
+{{- if .Values.nodeAgent.enabled }}
+{{- $na := .Values.nodeAgent }}
+{{- $url := required "nodeAgent.collectorURL must be set to the hub telemetry-ingest URL" $na.collectorURL }}
+{{- if not (regexMatch "^https?://[^/?#]+(/[^?#]*)?$" $url) }}
+{{- fail (printf "nodeAgent.collectorURL %q must be an http(s) URL without a query string" $url) }}
+{{- end }}
+{{- $tag := required "nodeAgent.image.tag must be set to a pinned version, not latest" $na.image.tag }}
+{{- if .Values.coroot.enabled }}
+{{- fail "coroot.enabled and nodeAgent.enabled are both set: two agents would report the same containers; use one" }}
+{{- end }}
+# Coroot's node-agent as a plain DaemonSet: eBPF telemetry from every node,
+# pushed to the hub's telemetry-ingest. No Coroot operator, Coroot CRD or
+# Coroot Helm chart is involved. The agent finds the hub from COLLECTOR_ENDPOINT
+# (it appends /v1/metrics, /v1/logs, /v1/traces and /v1/profiles) and
+# authenticates with the API key in a Secret in this namespace, which holds
+# this cluster's ingest key from the hub's Secret telemetry-ingest-keys.
+#
+# Two settings are not optional. hostPID and privileged: the agent loads eBPF
+# programs and reads the host's files through /proc/1/root (machine id,
+# container runtime sockets, logs), so neither can be dropped.
+{{- if $na.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $na.namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-agent
+  namespace: {{ $na.namespace }}
+# The agent never calls the Kubernetes API (it reads cgroups and runtime
+# sockets on the node), so it gets no token.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  namespace: {{ $na.namespace }}
+  labels:
+    app: node-agent
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      serviceAccountName: node-agent
+      automountServiceAccountToken: false
+      hostPID: true
+      {{- with $na.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $na.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: node-agent
+          image: "{{ $na.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ $na.image.pullPolicy }}
+          args:
+            - --cgroupfs-root=/host/sys/fs/cgroup
+            {{- range $na.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: COLLECTOR_ENDPOINT
+              value: {{ $url | quote }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $na.apiKeySecret.name }}
+                  key: {{ $na.apiKeySecret.key }}
+            - name: INSECURE_SKIP_VERIFY
+              value: {{ $na.tlsSkipVerify | quote }}
+            # Metrics the hub cannot take are kept here and retried, up to this
+            # size; the oldest batch is dropped beyond it. The directory is an
+            # emptyDir, so the spool survives a container restart.
+            - name: WAL_DIR
+              value: /var/lib/node-agent
+            - name: MAX_SPOOL_SIZE
+              value: {{ $na.spoolSize | quote }}
+            {{- if $na.caSecret.name }}
+            - name: CA_FILE
+              value: /etc/node-agent/ca/{{ $na.caSecret.key }}
+            {{- end }}
+            {{- with $na.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: cgroupfs
+              mountPath: /host/sys/fs/cgroup
+              readOnly: true
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: spool
+              mountPath: /var/lib/node-agent
+            {{- if $na.caSecret.name }}
+            - name: ca
+              mountPath: /etc/node-agent/ca
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml $na.resources | nindent 12 }}
+      volumes:
+        - name: cgroupfs
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: spool
+          emptyDir:
+            sizeLimit: {{ $na.spoolVolumeLimit }}
+        {{- if $na.caSecret.name }}
+        - name: ca
+          secret:
+            secretName: {{ $na.caSecret.name }}
+        {{- end }}
+{{- end }}

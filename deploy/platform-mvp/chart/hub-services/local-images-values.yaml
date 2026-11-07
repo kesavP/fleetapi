@@ -1,0 +1,21 @@
+# Overlay for running the hub with images built locally and loaded into kind
+# (`make deploy-local`): the chart's default pull policy is Always, which would
+# ignore a loaded image and pull from the registry instead.
+bindingController:
+  image:
+    pullPolicy: IfNotPresent
+  dex:
+    pluginImage:
+      pullPolicy: IfNotPresent
+vmBindingController:
+  image:
+    pullPolicy: IfNotPresent
+vmSetGateway:
+  image:
+    pullPolicy: IfNotPresent
+alertRouter:
+  image:
+    pullPolicy: IfNotPresent
+telemetryIngest:
+  image:
+    pullPolicy: IfNotPresent

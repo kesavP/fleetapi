@@ -1,0 +1,25 @@
+{{- if .Values.coroot.enabled }}
+{{- $url := required "coroot.corootURL must be set to the hub Coroot server's URL" .Values.coroot.corootURL }}
+# Agents-only Coroot: the operator installs the node-agent (eBPF, one per node)
+# and the cluster-agent, and no server. The service map is built on the hub.
+# The API key is read from a Secret in this namespace, never from values.
+apiVersion: coroot.com/v1
+kind: Coroot
+metadata:
+  name: coroot
+  namespace: {{ .Values.coroot.namespace }}
+  labels:
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  agentsOnly:
+    corootURL: {{ $url | quote }}
+    tlsSkipVerify: {{ .Values.coroot.tlsSkipVerify }}
+  apiKeySecret:
+    name: {{ .Values.coroot.apiKeySecret.name }}
+    key: {{ .Values.coroot.apiKeySecret.key }}
+  {{- with .Values.coroot.nodeAgentResources }}
+  nodeAgent:
+    resources:
+      {{- toYaml . | nindent 6 }}
+  {{- end }}
+{{- end }}

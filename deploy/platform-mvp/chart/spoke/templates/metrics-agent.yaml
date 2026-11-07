@@ -210,9 +210,14 @@ spec:
         - name: config
           configMap:
             name: metrics-agent
+        # Optional so the spoke installs (and `helm --wait` returns) before the
+        # hub exists to issue the credential. The agent starts, its writes are
+        # refused until `make spoke-metrics-credentials` creates the Secret, and
+        # sending begins once it appears: the password file is read per request.
         - name: hub-credentials
           secret:
             secretName: {{ .Values.metricsAgent.credentialsSecret }}
+            optional: true
             items:
               - key: password
                 path: password

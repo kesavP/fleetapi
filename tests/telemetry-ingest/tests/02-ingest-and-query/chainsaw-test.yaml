@@ -1,0 +1,49 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: telemetry-ingest-and-query
+spec:
+  cluster: hub
+  description: >
+    What the Coroot agents send reaches ClickHouse and comes back through the
+    project-scoped read API: remote-write metrics (with a counter that resets),
+    OTLP/JSON traces with hex ids, logs, and a pprof profile. Each check reads
+    only the rows its own run wrote. The same metric and labels are also sent to
+    project eu, and the two projects must never see each other's data.
+  steps:
+  - name: send metrics, traces, logs and a profile for project us
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS:?run through make validate-telemetry-ingest}/checks.sh" ingest_all
+  - name: metrics keep labels, values and millisecond times, and rates survive a counter reset
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS}/checks.sh" check_metrics
+  - name: traces are stored with their ids and searchable
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS}/checks.sh" check_traces
+  - name: logs are searchable by severity, text and trace
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS}/checks.sh" check_logs
+  - name: the profile is served as top stacks and folded text
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS}/checks.sh" check_profiles
+  - name: project eu holds the same metric and cannot see project us' data
+    try:
+    - script:
+        timeout: 2m
+        content: |
+          bash "${TI_HELPERS}/checks.sh" check_isolation

@@ -1,0 +1,299 @@
+<title>Service Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: toolbar on top, map left, details panel right; stacks on phones. Edges come from sample data shaped like Coroot node-agent metrics. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eceef2;
+  --fg: #1b2230;
+  --muted: #5d6779;
+  --line: #d3d8e0;
+  --accent: #2457d6;
+  --ok: #1f8f55;
+  --warn: #b7791f;
+  --crit: #c53030;
+  --ext: #7a5ac8;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11151c; --surface: #1a202b; --surface-2: #232b38; --fg: #e6eaf1; --muted: #98a2b3;
+    --line: #333d4d; --accent: #6b95ff; --ok: #44c27f; --warn: #e0a84a; --crit: #f26b6b; --ext: #a78bfa;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11151c; --surface: #1a202b; --surface-2: #232b38; --fg: #e6eaf1; --muted: #98a2b3;
+  --line: #333d4d; --accent: #6b95ff; --ok: #44c27f; --warn: #e0a84a; --crit: #f26b6b; --ext: #a78bfa;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.45;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); margin: 2px 0 0; max-width: 62ch; }
+.badge { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid var(--line); color: var(--muted); padding: 3px 8px; border-radius: 4px; background: var(--surface); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+.toolbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+select { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 28px 6px 10px; }
+select:focus-visible, button:focus-visible, .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); margin-left: auto; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 3px; border-radius: 2px; display: inline-block; }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+@media (max-width: 860px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.map { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+svg { display: block; }
+.node { cursor: pointer; }
+.node rect.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.node.ext rect.box { stroke-dasharray: 4 3; stroke: var(--ext); }
+.node.outside rect.box { stroke-dasharray: 3 3; }
+.node.outside { opacity: .75; }
+.node.sel rect.box { stroke: var(--accent); stroke-width: 2.4; }
+.node text.name { fill: var(--fg); font-size: 12.5px; font-weight: 500; }
+.node text.meta { fill: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+.dim { opacity: .18; }
+.edge { fill: none; stroke-linecap: round; }
+.elabel { font-family: var(--font-mono); font-size: 10.5px; fill: var(--fg); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.panel h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.panel h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; font-weight: 500; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 6px 3px 0; }
+td { padding: 4px 6px 4px 0; border-top: 1px solid var(--line); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+td.n { font-family: var(--font-ui); overflow-wrap: anywhere; }
+th.r, td.r { text-align: right; padding-right: 0; }
+.err-ok { color: var(--ok); } .err-warn { color: var(--warn); } .err-crit { color: var(--crit); }
+.hint { color: var(--muted); font-size: 12px; margin: 0; }
+button.link { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; }
+summary { cursor: pointer; font-weight: 500; }
+pre { margin: 10px 0 0; background: var(--surface-2); border-radius: 6px; padding: 12px; font-family: var(--font-mono); font-size: 11.5px; overflow: auto; max-height: 320px; }
+.note { color: var(--muted); font-size: 12px; margin: 0; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Service Map</h1>
+      <p class="sub">Applications and the calls between them, built from the node-agent's telemetry and the Kubernetes API. Pick a cluster and a namespace, click an application.</p>
+    </div>
+    <span class="badge" id="status">loading</span>
+  </header>
+
+  <div class="toolbar">
+    <label for="cluster" id="clusterLabel" hidden>Cluster
+      <select id="cluster"></select>
+    </label>
+    <label for="ns">Namespace
+      <select id="ns"></select>
+    </label>
+    <label for="win">Window
+      <select id="win"><option value="15m">last 15 minutes</option><option value="1h" selected>last hour</option><option value="6h">last 6 hours</option></select>
+    </label>
+    <div class="legend" aria-label="Legend">
+      <span><i class="sw" style="background:var(--ok)"></i>errors under 1%</span>
+      <span><i class="sw" style="background:var(--warn)"></i>1% to 5%</span>
+      <span><i class="sw" style="background:var(--crit)"></i>over 5%</span>
+      <span>line width = request or connection rate</span>
+      <span>dashed box = outside the selection or external</span>
+      <span>dashed line = a call from one cluster to another</span>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="map" id="map" role="img" aria-label="Service map"></div>
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </div>
+
+  <details>
+    <summary>Graph JSON for this view</summary>
+    <p class="note">This is the shape a backend would return after resolving metrics to workloads: one object per application, one per edge.</p>
+    <pre id="json"></pre>
+  </details>
+</div>
+
+<script>
+let NODES = [], EDGES = [], byId = {};
+const nsSel = document.getElementById('ns');
+const clSel = document.getElementById('cluster');
+let CLUSTERS = [];
+const mapEl = document.getElementById('map');
+const panel = document.getElementById('panel');
+const jsonEl = document.getElementById('json');
+let selected = null;
+
+const winSel = document.getElementById('win');
+// A fixed range, for looking back at something that is over: /?from=<time>&to=<time>
+// (RFC 3339 or unix seconds). The window picker and the auto-refresh then do not apply.
+const URLQ = new URLSearchParams(location.search);
+const FIXED = URLQ.get('from') ? 'from=' + encodeURIComponent(URLQ.get('from')) + (URLQ.get('to') ? '&to=' + encodeURIComponent(URLQ.get('to')) : '') : '';
+if (FIXED) winSel.disabled = true;
+const statusEl = document.getElementById('status');
+
+const sev = e => e >= 5 ? 'crit' : e >= 1 ? 'warn' : 'ok';
+const cssVar = s => `var(--${s})`;
+const fmt = n => n >= 10 ? Math.round(n) : n >= 1 ? n.toFixed(1) : n.toFixed(2);
+const rate = e => e.rps != null ? e.rps : e.connPerSec;
+const unit = e => e.unit || (e.rps != null ? 'req/s' : 'conn/s');   // queries/s for a database, msgs/s for a broker
+const nm = id => (byId[id] || { name: id }).name;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const ms = v => v == null ? '–' : v + ' ms';
+
+function visible(ns, cl) {
+  if (!ns && !cl) return { nodes: NODES, edges: EDGES, inside: new Set(NODES.map(n => n.id)) };
+  const inside = new Set(NODES.filter(n => (!ns || n.namespace === ns) && (!cl || n.cluster === cl)).map(n => n.id));
+  const edges = EDGES.filter(e => inside.has(e.from) || inside.has(e.to));
+  const ids = new Set(edges.flatMap(e => [e.from, e.to]));
+  inside.forEach(i => ids.add(i));
+  return { nodes: NODES.filter(n => ids.has(n.id)), edges, inside };
+}
+
+function layout(nodes, edges) {
+  const depth = Object.fromEntries(nodes.map(n => [n.id, 0]));
+  for (let i = 0; i < nodes.length; i++) edges.forEach(e => { if (depth[e.to] < depth[e.from] + 1) depth[e.to] = depth[e.from] + 1; });
+  const layers = [];
+  nodes.forEach(n => (layers[depth[n.id]] = layers[depth[n.id]] || []).push(n));
+  const L = layers.filter(Boolean);
+  const pos = {};
+  const W = 156, H = 46, CX = 120, RY = 70, PX = 20, PY = 24;
+  const tall = Math.max(...L.map(l => l.length));
+  L.forEach((layer, ci) => {
+    if (ci > 0) layer.sort((a, b) => bary(a) - bary(b));
+    function bary(n) {
+      const ps = edges.filter(e => e.to === n.id && pos[e.from]).map(e => pos[e.from].y);
+      return ps.length ? ps.reduce((s, v) => s + v, 0) / ps.length : 0;
+    }
+    const top = PY + ((tall - layer.length) * RY) / 2;
+    layer.forEach((n, i) => { pos[n.id] = { x: PX + ci * (W + CX), y: top + i * RY, w: W, h: H }; });
+  });
+  return { pos, width: PX * 2 + L.length * W + (L.length - 1) * CX, height: PY * 2 + (tall - 1) * RY + H };
+}
+
+function draw() {
+  const ns = nsSel.value, cl = clSel.value;
+  const { nodes, edges, inside } = visible(ns, cl);
+  if (selected && !nodes.find(n => n.id === selected)) selected = null;
+  if (!nodes.length) {
+    mapEl.innerHTML = '<p class="hint" style="padding:16px">No connections seen in this window.</p>';
+    renderPanel(nodes, edges, ns);
+    jsonEl.textContent = '{}';
+    return;
+  }
+  const { pos, width, height } = layout(nodes, edges);
+  const nodeErr = {};
+  edges.forEach(e => { nodeErr[e.to] = Math.max(nodeErr[e.to] || 0, e.errPct); });
+  const sel = selected;
+  const touches = e => sel && (e.from === sel || e.to === sel);
+  const neighbours = new Set(sel ? edges.filter(touches).flatMap(e => [e.from, e.to]) : []);
+
+  let s = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+  s += `<defs>${['ok','warn','crit'].map(k => `<marker id="a-${k}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="${cssVar(k)}"/></marker>`).join('')}</defs>`;
+  edges.forEach(e => {
+    const a = pos[e.from], b = pos[e.to];
+    const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+    const dx = Math.max(40, (x2 - x1) / 2);
+    const k = sev(e.errPct), w = 1.3 + Math.log10(1 + rate(e)) * 1.8;
+    const cls = 'edge' + (sel && !touches(e) ? ' dim' : '');
+    s += `<g class="${cls}"><path class="edge" d="M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2 - 2} ${y2}" stroke="${cssVar(k)}" stroke-width="${w.toFixed(1)}"${e.crossCluster ? ' stroke-dasharray="6 4"' : ''} marker-end="url(#a-${k})"><title>${esc(nm(e.from))} → ${esc(nm(e.to))}${e.protocol && e.protocol !== 'http' ? ' (' + esc(e.protocol) + ')' : ''}${e.crossCluster ? ' [cross-cluster]' : ''}: ${fmt(rate(e))} ${unit(e)}, ${e.errPct}% ${{ 'http': 'server errors', 'http+tcp': 'server errors and failed connects', 'calls': 'failed calls', 'calls+tcp': 'failed calls and failed connects', 'tcp': 'failed connects' }[e.errBasis] || e.errBasis}, p95 ${ms(e.p95ms)}</title></path></g>`;
+    if (touches(e)) s += `<text class="elabel" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 5}" text-anchor="middle">${fmt(rate(e))} ${unit(e)} · ${e.errPct}%</text>`;
+  });
+  nodes.forEach(n => {
+    const p = pos[n.id];
+    const k = n.external ? null : sev(nodeErr[n.id] || 0);
+    const cls = ['node', n.external ? 'ext' : '', (ns || cl) && !inside.has(n.id) ? 'outside' : '', n.id === sel ? 'sel' : '', sel && n.id !== sel && !neighbours.has(n.id) ? 'dim' : ''].join(' ');
+    const label = esc(n.name.length > 22 ? n.name.slice(0, 21) + '…' : n.name);
+    const where = (n.cluster ? n.cluster + ' · ' : '') + 'ns:' + n.namespace;
+    const meta = n.external ? 'external endpoint' : n.serves && n.serves.length ? `${n.serves.join(', ')} · ${where}` : `${where} · ${n.kind}`;
+    s += `<g class="${cls}" data-id="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.name)}"><title>${esc(n.id)}</title><rect class="box" x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="6"/>`;
+    s += `<circle cx="${p.x + 12}" cy="${p.y + 15}" r="4.5" fill="${n.external ? 'var(--ext)' : cssVar(k)}"/>`;
+    s += `<text class="name" x="${p.x + 24}" y="${p.y + 19}">${label}</text><text class="meta" x="${p.x + 12}" y="${p.y + 36}">${meta.length > 26 ? meta.slice(0, 25) + '…' : meta}</text></g>`;
+  });
+  s += '</svg>';
+  mapEl.innerHTML = s;
+  mapEl.querySelectorAll('.node').forEach(g => {
+    const pick = () => { selected = selected === g.dataset.id ? null : g.dataset.id; draw(); const t = mapEl.querySelector(`.node[data-id="${CSS.escape(selected || '')}"]`); if (t) t.focus(); };
+    g.addEventListener('click', pick);
+    g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+  });
+  renderPanel(nodes, edges, ns);
+  jsonEl.textContent = JSON.stringify({ namespace: ns || 'all', nodes: nodes, edges }, null, 2);
+}
+
+function errCell(e) { return `<span class="err-${sev(e)}">${e}%</span>`; }
+
+function renderPanel(nodes, edges, ns) {
+  if (!selected) {
+    const sumOf = f => edges.filter(e => e.rps != null && f(e)).reduce((s, e) => s + e.rps, 0);
+    const total = sumOf(e => !e.protocol || e.protocol === 'http');
+    const stores = sumOf(e => e.protocol && e.protocol !== 'http');
+    const bad = edges.filter(e => e.errPct >= 1).sort((a, b) => b.errPct - a.errPct);
+    panel.innerHTML = `<h2>${ns ? 'Namespace ' + ns : 'All namespaces'}</h2>
+      <dl class="kv"><dt>Applications</dt><dd>${nodes.length}</dd><dt>Connections</dt><dd>${edges.length}</dd><dt>HTTP traffic</dt><dd>${fmt(total)} req/s</dd><dt>Database and broker calls</dt><dd>${fmt(stores)} calls/s</dd></dl>
+      ${CLUSTERS.length > 1 ? `<div><h3>Clusters</h3><table><tbody>${CLUSTERS.map(c => `<tr><td class="n">${esc(c.name)}</td><td class="r">${c.ok ? c.nodes + ' apps' : '<span class="err-crit">not read</span>'}</td></tr>${c.ok ? '' : `<tr><td colspan="2" class="hint">${esc(c.error)}</td></tr>`}`).join('')}</tbody></table></div>` : ''}
+      <div><h3>Edges with errors</h3>${bad.length ? `<table><tbody>${bad.map(e => `<tr><td class="n">${esc(nm(e.from))} → ${esc(nm(e.to))}</td><td class="r">${errCell(e.errPct)}</td></tr>`).join('')}</tbody></table>` : '<p class="hint">None in this view.</p>'}</div>
+      <p class="hint">Select an application to see who calls it and what it calls.</p>`;
+    return;
+  }
+  const n = byId[selected];
+  const inc = edges.filter(e => e.to === selected), out = edges.filter(e => e.from === selected);
+  const row = (e, other) => `<tr><td class="n"><button class="link" data-go="${esc(other)}">${esc(nm(other))}</button></td><td class="r">${fmt(rate(e))} ${unit(e)}</td><td class="r">${errCell(e.errPct)}</td><td class="r">${ms(e.p95ms)}</td></tr>`;
+  const tbl = (list, key) => list.length ? `<table><thead><tr><th>${key === 'from' ? 'Caller' : 'Callee'}</th><th class="r">rate</th><th class="r">errors</th><th class="r">p95</th></tr></thead><tbody>${list.map(e => row(e, e[key])).join('')}</tbody></table>` : '<p class="hint">None.</p>';
+  panel.innerHTML = `<h2>${esc(n.name)}</h2>
+    <dl class="kv"><dt>Kind</dt><dd>${n.kind}</dd>${n.cluster ? `<dt>Cluster</dt><dd>${esc(n.cluster)}</dd>` : ''}${n.serves && n.serves.length ? `<dt>Serves</dt><dd>${esc(n.serves.join(', '))}</dd>` : ''}${n.namespace ? `<dt>Namespace</dt><dd>${esc(n.namespace)}</dd>` : ''}</dl>
+    <div><h3>Called by</h3>${tbl(inc, 'from')}</div>
+    <div><h3>Calls</h3>${tbl(out, 'to')}</div>
+    <p class="hint">p95 is shown for edges to databases, caches and Kafka, whose latency the agent measures; HTTP edges and RabbitMQ or NATS show a dash. Error rate is the share of failed calls: 5xx responses, gRPC server-side failures (UNAVAILABLE, INTERNAL, DEADLINE_EXCEEDED and similar), and failed TCP connects (each counted as one call). Where no HTTP or gRPC is seen it is the share of connects that failed.</p>`;
+  panel.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => { selected = b.dataset.go; draw(); }));
+}
+
+function fillClusters() {
+  const keep = clSel.value;
+  const names = CLUSTERS.map(c => c.name);
+  document.getElementById('clusterLabel').hidden = names.length < 2;
+  clSel.innerHTML = '';
+  clSel.add(new Option('All clusters', ''));
+  names.forEach(v => clSel.add(new Option(v, v)));
+  clSel.value = names.includes(keep) ? keep : '';
+}
+
+function fillNamespaces() {
+  const keep = nsSel.value, cl = clSel.value;
+  const names = [...new Set(NODES.filter(n => !cl || n.cluster === cl).map(n => n.namespace).filter(Boolean))].sort();
+  nsSel.innerHTML = '';
+  nsSel.add(new Option('All namespaces', ''));
+  names.forEach(v => nsSel.add(new Option(v, v)));
+  nsSel.value = names.includes(keep) ? keep : (names.includes('default') ? 'default' : '');
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/graph?' + (FIXED || 'window=' + encodeURIComponent(winSel.value)));
+    const g = await r.json();
+    if (!r.ok) throw new Error(g.error || r.status);
+    NODES = g.nodes; EDGES = g.edges; CLUSTERS = g.clusters || []; byId = Object.fromEntries(NODES.map(n => [n.id, n]));
+    statusEl.textContent = (FIXED ? g.window : 'updated ' + new Date(g.generated * 1000).toLocaleTimeString()) + (CLUSTERS.some(c => !c.ok) ? ' (' + CLUSTERS.filter(c => !c.ok).length + ' cluster' + (CLUSTERS.filter(c => !c.ok).length > 1 ? 's' : '') + ' not read)' : g.warnings && g.warnings.length ? ' (partial data)' : '');
+    statusEl.title = (g.warnings || []).join('; ');
+    fillClusters();
+    fillNamespaces();
+    draw();
+  } catch (err) {
+    statusEl.textContent = 'error';
+    panel.innerHTML = '<h2>No data</h2><p class="hint">' + esc(err.message) + '</p>';
+  }
+}
+
+nsSel.addEventListener('change', () => { selected = null; draw(); });
+clSel.addEventListener('change', () => { selected = null; fillNamespaces(); draw(); });
+winSel.addEventListener('change', load);
+load();
+if (!FIXED) setInterval(load, 30000);
+</script>

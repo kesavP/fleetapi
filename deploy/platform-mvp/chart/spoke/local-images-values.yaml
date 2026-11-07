@@ -1,0 +1,9 @@
+# Overlay for running a spoke with images built locally and loaded into kind
+# (`make deploy-local`): the chart's default pull policy is Always, which would
+# ignore a loaded image and pull from the registry instead.
+widgetOperator:
+  image:
+    pullPolicy: IfNotPresent
+oidcVerifier:
+  image:
+    pullPolicy: IfNotPresent
