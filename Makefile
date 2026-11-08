@@ -89,6 +89,7 @@ VMSG_IMAGE         ?= $(DOCKER_REGISTRY)/vmset-gateway:$(IMAGE_TAG)
 AR_IMAGE           ?= $(DOCKER_REGISTRY)/alert-router:$(IMAGE_TAG)
 TI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ingest:$(IMAGE_TAG)
 UI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ui:$(IMAGE_TAG)
+ALERTS_IMAGE       ?= $(DOCKER_REGISTRY)/telemetry-alerts:$(IMAGE_TAG)
 
 CRDS_DIR           ?= deploy/platform-mvp/crds
 OUT_DIR            ?= bin
@@ -142,7 +143,7 @@ help:
 	@echo "  make verify-all         Full clean-room: clean → deploy → validate → deploy-cd"
 
 # ── Test ─────────────────────────────────────────────────────────────────────
-.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
+.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
 test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti
 	@echo "==> All unit tests passed"
 
@@ -199,6 +200,14 @@ ui-dev: ui-install
 # The hub chart's telemetry-ui template (rendering only; needs Docker).
 test-ui-chart:
 	./hack/platform-mvp/test-telemetry-ui-chart.sh
+
+# The hub chart's telemetry-alerts template (rendering only; needs Docker).
+test-telemetry-alerts-chart:
+	./hack/platform-mvp/test-telemetry-alerts-chart.sh
+
+# The built alert service against a stub API and Alertmanager: firing, auth, metrics, restart, resolve (needs Docker, ~2 min).
+test-telemetry-alerts-image:
+	./hack/platform-mvp/test-telemetry-alerts-image.sh
 
 # The built image against a stub API: proxying, GET-only, blocked paths, headers, read-only root.
 test-ui-image:
@@ -366,11 +375,15 @@ build-telemetry-ingest-image:
 	@echo "==> Building $(TI_IMAGE)"
 	docker build -t $(TI_IMAGE) $(TI_DIR)
 
-# Not part of build-images: the UI is opt-in, like the service it reads.
-.PHONY: build-telemetry-ui-image push-telemetry-ui
+# Not part of build-images: the UI and the alert service are opt-in, like the service they read.
+.PHONY: build-telemetry-ui-image push-telemetry-ui build-telemetry-alerts-image push-telemetry-alerts
 build-telemetry-ui-image:
 	@echo "==> Building $(UI_IMAGE)"
 	docker build -t $(UI_IMAGE) $(UI_DIR)
+
+build-telemetry-alerts-image:
+	@echo "==> Building $(ALERTS_IMAGE)"
+	docker build -f $(UI_DIR)/Dockerfile.alerts -t $(ALERTS_IMAGE) $(UI_DIR)
 
 # Build all images in parallel
 build-images-parallel:
@@ -409,6 +422,8 @@ push-telemetry-ingest:
 	docker push $(TI_IMAGE)
 push-telemetry-ui:
 	docker push $(UI_IMAGE)
+push-telemetry-alerts:
+	docker push $(ALERTS_IMAGE)
 
 push-images-parallel:
 	@echo "==> Pushing all images to $(DOCKER_REGISTRY)"

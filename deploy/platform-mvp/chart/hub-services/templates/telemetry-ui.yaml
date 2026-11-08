@@ -82,6 +82,10 @@ spec:
           env:
             - name: API_UPSTREAM
               value: {{ default (printf "http://telemetry-ingest.%s.svc.cluster.local" $.Values.telemetryIngest.namespace) $ui.apiUpstream | quote }}
+            # The alerts path of the read API goes to the alert service (telemetryAlerts); if it is not deployed that path
+            # answers 502 and the page does its own checking.
+            - name: ALERTS_UPSTREAM
+              value: {{ default (printf "http://telemetry-alerts.%s.svc.cluster.local" $.Values.telemetryAlerts.namespace) $ui.alertsUpstream | quote }}
           ports:
             - name: http
               containerPort: 8080

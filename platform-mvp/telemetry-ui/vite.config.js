@@ -9,5 +9,6 @@ export default defineConfig({
   plugins: [vue()],
   server: { port: 5173, proxy: { '/api': { target, changeOrigin: false } } },
   build: { sourcemap: false, chunkSizeWarningLimit: 600 },
-  test: { environment: 'jsdom', include: ['src/**/*.test.js'] },
+  // The service's tests (server/) need a real Node, not a browser stand-in: each says so in its first line.
+  test: { environment: 'jsdom', include: ['src/**/*.test.js', 'server/**/*.test.js'] },
 })

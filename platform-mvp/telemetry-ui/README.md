@@ -1,8 +1,23 @@
 # telemetry-ui
 
-A Vue 3 + Vite app for the telemetry-ingest read API, served by nginx. **Step 1 (this scaffold)** is the
-connection screen only: a project and its read key, checked against the API before they are kept. The
-views (services, service map, traces, logs, profiles) come next and plug into the router.
+A Vue 3 + Vite app for the telemetry-ingest read API, served by nginx. Built so far:
+
+- **Connection** (`/`): a project and its read key, checked against the API before they are kept.
+- **Services** (`/services`): the services a project has, merged from its traces, logs and profiles, with a time window
+  and a name filter. One source failing shows a warning instead of hiding the rest.
+- **Service** (`/services/<name>`): span counts, errors and latency percentiles by span kind, a timeline, recent errors,
+  spans and logs, and profile types, plus traffic in and out and CPU, memory and restarts from the metrics. Span figures
+  cover the newest 1000 spans; the page says when that is less than the window.
+- **Map** (`/map`): who calls whom, drawn from the agents' connection, HTTP/gRPC and database counters; selecting a service
+  lists its calls and links to its page. See `docs/platform-mvp/21-telemetry-ui.md` for how services are recognised.
+- **Traces** (`/traces`, `/traces/<id>`) and **Logs** (`/logs`): filterable searches, a waterfall for one trace; filters live in
+  the address so a search can be shared.
+- **Profiles** (`/profiles`): a flame graph with zoom and highlight, and a table of the hottest functions.
+- **Alerts** (`/alerts`): rules for "service not serving", a nav badge, and *Analyze with Claude*, which builds a masked report to
+  paste into your own Claude subscription. The rules run in the **alert service** (`Dockerfile.alerts`, `server/`) when it is deployed,
+  which checks every project with nobody looking and can tell an Alertmanager; otherwise the page runs them itself while it is open.
+
+HTTP latency comes next and plug into the router.
 
 ## Origin
 
@@ -56,9 +71,11 @@ the `telemetry-ingest` Service. nginx resolves it per request, so the pod starts
 
 | Command | Covers |
 | --- | --- |
-| `make test-ui` | 42 Vitest tests (API client, session store, connection form), lint, build |
+| `make test-ui` | 400 Vitest tests (API client, session store, connection form, services list, service page, map logic and view, traces, trace, logs, profiles, alert rules, state, store, report; the alert service's config, auth, evaluator, notifications and an end-to-end run), lint, build |
 | `make test-ui-chart` | chart rendering: off by default, service types, locked-down pod, no Secret |
-| `make test-ui-image` | the real image in front of a stub API: proxying, GET-only, blocked paths, headers, read-only root, starts without its API |
+| `make test-ui-image` | the real image in front of a stub API: proxying, GET-only, blocked paths, the alerts path's routing, headers, read-only root, starts without its API |
+| `make test-telemetry-alerts-chart` | the alert service's chart template: locked-down pod, only `projects.json` mounted, settings, persistence |
+| `make test-telemetry-alerts-image` | the real alert service image through firing, auth, metrics, Alertmanager, restart and resolution |
 
 The chart serves plain HTTP. The read key crosses it in a header: keep the Service private or put TLS in
 front before exposing it beyond a port-forward.

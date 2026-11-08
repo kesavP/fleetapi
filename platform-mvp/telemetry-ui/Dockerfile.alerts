@@ -1,0 +1,17 @@
+# The alert service. Build with this directory as the context:
+#   docker build -f Dockerfile.alerts -t telemetry-alerts platform-mvp/telemetry-ui
+#
+# It has no dependencies of its own: it runs the same rule modules the browser does, on plain Node, so the image is Node and
+# the few source files it needs and nothing else (no npm install, no build step).
+FROM node:24-alpine
+WORKDIR /app
+# "type": "module" is what makes the .js files below ES modules
+COPY package.json ./
+COPY src/alerts/rules.js src/alerts/state.js src/alerts/run.js src/alerts/
+COPY src/map/load.js src/map/graph.js src/map/workload.js src/map/
+COPY src/api/client.js src/api/
+COPY server/config.js server/projects.js server/notify.js server/evaluator.js server/app.js server/main.js server/
+ENV NODE_ENV=production
+USER node
+EXPOSE 8081
+CMD ["node", "server/main.js"]

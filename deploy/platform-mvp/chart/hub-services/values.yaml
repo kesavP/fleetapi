@@ -175,6 +175,8 @@ telemetryUi:
   runAsUser: 101
   # Where /api is proxied (scheme and host, no path). Empty: the telemetry-ingest Service.
   apiUpstream: ""
+  # Where the alerts path goes. Empty: the telemetry-alerts Service.
+  alertsUpstream: ""
   service:
     type: ClusterIP
     nodePort: 30082
@@ -183,6 +185,40 @@ telemetryUi:
   resources:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { cpu: 200m, memory: 64Mi }
+
+# The alert service (platform-mvp/telemetry-ui, Dockerfile.alerts): checks every project for services that are not serving, with
+# nobody looking, and serves the result to the UI at /api/v1/projects/<project>/alerts (same read keys). It reads the project
+# list and read keys from the telemetry-ingest-keys Secret, so it must run in the same namespace as telemetryIngest. Build and push
+# the image first (`make build-telemetry-alerts-image push-telemetry-alerts`). Optional: tell an Alertmanager as well.
+telemetryAlerts:
+  enabled: false
+  namespace: monitoring
+  image:
+    repository: sojoner/telemetry-alerts
+    tag: dev
+    pullPolicy: Always
+  # Numeric UID of the node image's non-root user.
+  runAsUser: 1000
+  # Empty: the telemetry-ingest Service.
+  readApi: ""
+  intervalSeconds: 60
+  # Where to post firing alerts, for example http://hub-kube-prometheus-stack-alertmanager.monitoring.svc:9093 (check the name
+  # with `kubectl -n monitoring get svc`). Empty: not posted; the UI and /metrics still have them.
+  alertmanagerUrl: ""
+  # Thresholds that differ from the defaults, for example {errorShare: 10, baselineSeconds: 7200}. See alerts/rules.js.
+  thresholds: {}
+  # Alert state is kept in a file so a restart does not forget what is firing. An emptyDir survives a container restart but not
+  # a new pod; a volume survives both.
+  persistence:
+    enabled: false
+    size: 100Mi
+    storageClassName: ""
+  # A ServiceMonitor for /metrics. Needs the Prometheus Operator CRDs; leave off on a cluster without them.
+  serviceMonitor:
+    enabled: false
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 192Mi }
 
 # Receives the spokes' pod metrics. Each spoke runs a Prometheus agent that
 # remote-writes here; this proxy is the only way in, so the hub Prometheus is

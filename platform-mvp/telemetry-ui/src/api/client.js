@@ -41,7 +41,10 @@ export function createClient({ session, fetchImpl = (...a) => fetch(...a), base 
       res = await fetchImpl(url, {
         headers: { 'X-API-Key': s.key, Accept: 'application/json' },
         signal: controller.signal,
-        credentials: 'omit',
+        // Same-origin cookies only: the app sets none and the key is never a cookie, but a proxy in front of it
+        // (Cloud Shell's web preview, IAP, oauth2-proxy) authenticates with one, and a request without it gets
+        // redirected to a login page that the CSP then blocks.
+        credentials: 'same-origin',
         cache: 'no-store',
       })
     } catch {

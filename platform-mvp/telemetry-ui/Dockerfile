@@ -16,5 +16,6 @@ COPY nginx/05-resolver.envsh /docker-entrypoint.d/05-resolver.envsh
 COPY --from=build /src/dist /usr/share/nginx/html
 # Only these two are substituted into the template: the nginx variables in it ($api, $uri, ...) stay as they are.
 ENV API_UPSTREAM=http://telemetry-ingest \
-    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|NGINX_RESOLVER)$'
+    ALERTS_UPSTREAM=http://telemetry-alerts \
+    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|ALERTS_UPSTREAM|NGINX_RESOLVER)$'
 EXPOSE 8080

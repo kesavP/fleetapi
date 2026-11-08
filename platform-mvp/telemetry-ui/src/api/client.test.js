@@ -27,14 +27,14 @@ function fakeFetch(status, body, { text } = {}) {
 const clientWith = (fetchImpl, session = connected, extra = {}) => createClient({ session, fetchImpl, ...extra })
 
 describe('a request', () => {
-  it('carries the key in a header, never in the URL, and sends no cookies', async () => {
+  it('carries the key in a header, never in the URL, and sends cookies only to its own origin', async () => {
     const f = fakeFetch(200, { data: ['a'] })
     await clientWith(f).get('metrics')
     const { url, init } = f.calls[0]
     expect(url).toBe('/api/v1/projects/gke/metrics')
     expect(url).not.toContain(KEY)
     expect(init.headers['X-API-Key']).toBe(KEY)
-    expect(init.credentials).toBe('omit')
+    expect(init.credentials).toBe('same-origin')
     expect(init.cache).toBe('no-store')
   })
 

@@ -19,7 +19,7 @@ cluster running a trivial widget-operator. No cloud dependency.
 - [Deploy on kind](docs/platform-mvp/18-deploy-on-kind.md) — step-by-step runbook, with no registry needed
 - [Coroot](docs/platform-mvp/19-coroot-agents.md) — hub server and spoke agents for the service map (untested on a real cluster)
 - [Telemetry ingest](docs/platform-mvp/20-telemetry-ingest.md) — hub service that stores the Coroot agents' metrics, traces, logs and profiles in ClickHouse and serves them per project (tested outside a cluster)
-- [Telemetry UI](docs/platform-mvp/21-telemetry-ui.md) — Vue app served by nginx in front of the read API: connection screen first, data views next
+- [Telemetry UI](docs/platform-mvp/21-telemetry-ui.md) — Vue app served by nginx in front of the read API: connection screen and services list; more views next
 
 ## Why This Architecture
 

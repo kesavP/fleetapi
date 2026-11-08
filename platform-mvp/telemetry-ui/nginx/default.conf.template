@@ -1,6 +1,14 @@
 # Rendered when the container starts, by the nginx image's entrypoint (envsubst), from two variables:
 #   ${API_UPSTREAM}    where /api goes: scheme and host, no path (default http://telemetry-ingest)
+#   ${ALERTS_UPSTREAM} where /api/v1/projects/<project>/alerts goes (default http://telemetry-alerts): the alert service, which
+#                      answers with the same read keys. If it is not deployed that path answers 502 and the page checks for itself.
 #   ${NGINX_RESOLVER}  the name servers, from /etc/resolv.conf (see 05-resolver.envsh)
+# One path of the read API belongs to another service. A map is how nginx picks an upstream by path while keeping one location.
+map $uri $api_target {
+    default ${API_UPSTREAM};
+    ~^/api/v1/projects/[^/]+/alerts/?$ ${ALERTS_UPSTREAM};
+}
+
 server {
     listen 8080;
     server_name _;
@@ -12,7 +20,6 @@ server {
     # The API is looked up when a request arrives, not at start-up. With a name in proxy_pass nginx resolves
     # it once at start and refuses to start if it cannot: the UI would crash-loop until the API existed.
     resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
-    set $api ${API_UPSTREAM};
 
     client_max_body_size 1k;   # the UI only reads
     gzip on;
@@ -34,7 +41,7 @@ server {
         }
         include /etc/nginx/snippets/security-headers.conf;
         add_header Cache-Control "no-store" always;
-        proxy_pass $api;
+        proxy_pass $api_target;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_connect_timeout 5s;
