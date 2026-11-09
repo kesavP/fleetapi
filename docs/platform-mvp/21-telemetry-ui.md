@@ -5,8 +5,51 @@ A browser front end for the [telemetry-ingest](20-telemetry-ingest.md) read API.
 
 ## Status
 
-Step 1 (scaffold and connection screen) step 2 (the services list) step 3 (the per-service page) step 4 (the service map), step 5 (metrics on the service page) step 6 (the traces and logs views) step 7 (the profiles view) step 8 (alerts for services that are not serving) and step 9 (running the rules in a service) are done. The services list merges the services seen in traces, logs and profiles, with a time window, a name filter and per-source failure handling.
+Step 1 (scaffold and connection screen) step 2 (the services list) step 3 (the per-service page) step 4 (the service map), step 5 (metrics on the service page) step 6 (the traces and logs views) step 7 (the profiles view) step 8 (alerts for services that are not serving) step 9 (running the rules in a service) and step 10 (a sidebar menu and the Applications page) are done. The services list merges the services seen in traces, logs and profiles, with a time window, a name filter and per-source failure handling.
 chart template, Makefile targets, tests. No data views yet; they are the next steps.
+
+## The menu and the Applications page
+
+The main menu is a **sidebar** with one entry per page, each its own page: **Applications**, **Map**, **Traces**, **Logs**,
+**Profiles** and **Alerts** (with a count of what is firing). At the bottom are the connected **project** (it links to the
+Connection page, where you change it) and **Collapse**, which shrinks the menu to icons and is remembered; on a narrow window it is
+icons only. The Alerts count stays visible on its icon when the menu is collapsed. `/` goes to the applications when there is a
+connection and to the connection page when there is not, and connecting opens the applications. The old Services addresses
+(`/services`, `/services/<name>`) still work and land on the applications.
+
+**Applications** (`/applications`) replaces the Services page. It lists every application of the project, as the reference page does:
+
+- **Namespaces** are a drop-down you can fill with any number of namespaces (none means all), with a filter, select-all and clear.
+  Three checkboxes choose the *kinds* of namespace shown: **application** (on by default), **control-plane** (`kube-system`, `gke-*`,
+  `istio-system`, ...) and **monitoring** (`monitoring`, `prometheus*`, `telemetry*`, ...). The drop-down offers only the namespaces
+  of the kinds that are on. Search matches an application or namespace name.
+- **Status chips** count the applications by how they are doing and narrow the table when pressed: **Critical** (an alert firing at
+  that level, or it has pods and none is running), **Warning** (a warning alert, a restart or OOM kill in the window, or at least 1% of
+  the calls it answers failing), **Errors in logs** (only its logs show errors), **No data** (only a name is known) and **OK**. The
+  coloured bar on each row is the same status. A firing alert changes an application's status on the page without a reload.
+- **Columns:** type (from the node-agent, else the protocol it serves), traffic in (calls a second), errors (share of those calls
+  failing), upstreams (calls out that are healthy over all), instances (pods running over pods seen in the window), restarts in the
+  window, CPU (mean cores), memory, and unique errors in its logs (a link to them).
+- The time range is at the top right. The choices are in the address, so a view can be shared.
+
+**Where the list comes from.** The API has no inventory, so it is assembled, and the node-agent's own metrics are the source, so an
+application that stopped sending traces still appears (as down, not as missing): every workload with a container in the memory gauge,
+plus any service the traces or logs name and any node of the call map. Pods that stopped reporting keep their last reading, which is
+how "0 of 1 running" is told from "never existed". Instances are pods, not containers, so a sidecar is not a second instance. Each
+metric is read once for all applications, about 25 reads per load however many applications there are.
+
+Limits: there is no latency column (HTTP latency is not read yet), no sorting by column (rows are sorted worst first), and the logs
+column counts unique `ERROR` lines among the newest 1000 of the window, grouped so that lines differing only in numbers count once. If a
+metric hits the series cap the page says the list may be partial.
+
+**Trying it without a cluster.** `server/testing/demo-read-api.js` is a small stand-in for the read API with a shop that has a few
+things wrong (a restarting service, failing calls to Redis, error logs, a stopped pod), for screenshots and development:
+
+```sh
+docker run --rm -d --name demo-api -p 8090:8080 -v "$PWD/platform-mvp/telemetry-ui":/app:ro -w /app \
+  -e KEY=demo-read-key -e PROJECT=demo node:24-alpine node server/testing/demo-read-api.js
+make ui-dev UI_API=http://host.docker.internal:8090      # then connect to project "demo" with the key "demo-read-key"
+```
 
 ## Decisions
 
@@ -29,7 +72,7 @@ kubectl -n monitoring port-forward svc/telemetry-ui 8081:80
 
 ## Verified
 
-- `make test-ui`: lint clean, 400 unit tests, production build (about 95 kB JS, 37 kB gzip).
+- `make test-ui`: lint clean, 467 unit tests, production build (about 95 kB JS, 37 kB gzip).
 - `make test-ui-chart`: renders nothing when disabled; Service type and node-port validation; pod runs as uid 101 with a
   read-only root, no ServiceAccount token, no capabilities; no Secret; proxy target defaults and overrides.
 - `make test-ui-image`: against a stub API, `X-API-Key` and the path arrive unchanged; POST gets 405; `/v1/*` and other

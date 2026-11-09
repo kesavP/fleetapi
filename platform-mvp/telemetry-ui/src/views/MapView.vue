@@ -79,10 +79,10 @@ onMounted(load)
 </script>
 
 <template>
+  <div class="page-head"><h1>Service map</h1></div>
   <section class="panel">
-    <h2>Service map</h2>
     <p v-if="!connected" class="help">
-      Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.
+      Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.
     </p>
     <template v-else>
       <p class="help">
@@ -97,7 +97,7 @@ onMounted(load)
         <button type="button" class="secondary" :disabled="loading" @click="load">{{ loading ? 'Loading…' : 'Refresh' }}</button>
       </div>
 
-      <p v-if="fatal" class="error" role="alert">{{ fatal }} <router-link to="/">Check the connection.</router-link></p>
+      <p v-if="fatal" class="error" role="alert">{{ fatal }} <router-link to="/connection">Check the connection.</router-link></p>
       <template v-else-if="map">
         <ul v-if="map.warnings.length" class="warn-list" role="status">
           <li v-for="w in map.warnings" :key="w">{{ w }}</li>
@@ -135,7 +135,7 @@ onMounted(load)
 
         <section v-if="node" class="detail" aria-live="polite">
           <h3>{{ node.label }} <span v-if="node.external" class="tag">external</span></h3>
-          <p v-if="!node.external"><router-link :to="{ name: 'service', params: { name: node.id } }">Open the service page</router-link></p>
+          <p v-if="!node.external"><router-link :to="{ name: 'application', params: { name: node.id } }">Open the service page</router-link></p>
           <p v-if="!inbound.length && !outbound.length" class="help">No calls in the window.</p>
           <template v-if="outbound.length">
             <h4>Calls out</h4>

@@ -25,7 +25,7 @@ const searches = (c) => c.get.mock.calls.filter(([p]) => p === 'logs')
 async function mountAt(query = '', props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/logs', name: 'logs', component: LogsView }, { path: '/traces/:id', name: 'trace', component: stub }, { path: '/services/:name', name: 'service', component: stub }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/logs', name: 'logs', component: LogsView }, { path: '/traces/:id', name: 'trace', component: stub }, { path: '/applications/:name', name: 'application', component: stub }],
   })
   router.push('/logs' + query)
   await router.isReady()

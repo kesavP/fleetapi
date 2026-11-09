@@ -44,7 +44,7 @@ async function mountView({ recent = HEALTHY, baseline = HEALTHY, sess = session(
   })
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/services/:name', name: 'service', component: stub }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/applications/:name', name: 'application', component: stub }],
   })
   router.push('/')
   await router.isReady()
@@ -79,7 +79,7 @@ describe('AlertsView', () => {
     expect(a.text()).toContain('errorSharePct')
     expect(a.text()).toContain('Busiest callers: shop/frontend')
     expect(a.text()).not.toMatch(/\d{10,}/) // "since" is a readable time too
-    expect(a.get('a.name').attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Fcartservice')
+    expect(a.get('a.name').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Fcartservice')
     expect(w.find('[data-testid=all-clear]').exists()).toBe(false)
   })
 

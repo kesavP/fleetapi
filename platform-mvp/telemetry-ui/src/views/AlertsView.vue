@@ -77,9 +77,9 @@ onBeforeUnmount(() => clearInterval(tick))
 </script>
 
 <template>
+  <div class="page-head"><h1>Alerts</h1></div>
   <section class="panel">
-    <h2>Alerts</h2>
-    <p v-if="!connected" class="help">Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.</p>
+    <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p v-if="state.source === 'server'" class="help" data-testid="source-server">
         Is each service still <strong>serving</strong>? The <strong>alert service</strong> in the cluster compares the last
@@ -114,7 +114,7 @@ onBeforeUnmount(() => clearInterval(tick))
         <header>
           <span class="pill" :class="a.severity">{{ a.severity }}</span>
           <strong>{{ RULES[a.rule] || a.rule }}</strong>
-          <router-link v-if="a.service !== '*'" class="name" :to="{ name: 'service', params: { name: a.service } }">{{ a.label }}</router-link>
+          <router-link v-if="a.service !== '*'" class="name" :to="{ name: 'application', params: { name: a.service } }">{{ a.label }}</router-link>
           <span v-else class="name">whole project</span>
           <span v-if="a.status === 'pending'" class="tag">confirming</span>
         </header>

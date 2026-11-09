@@ -2,10 +2,13 @@
 
 A Vue 3 + Vite app for the telemetry-ingest read API, served by nginx. Built so far:
 
-- **Connection** (`/`): a project and its read key, checked against the API before they are kept.
-- **Services** (`/services`): the services a project has, merged from its traces, logs and profiles, with a time window
-  and a name filter. One source failing shows a warning instead of hiding the rest.
-- **Service** (`/services/<name>`): span counts, errors and latency percentiles by span kind, a timeline, recent errors,
+The menu is a sidebar; each entry is its own page. The project you are connected to is at its bottom, and **Collapse** shrinks it to icons.
+
+- **Connection** (`/connection`): a project and its read key, checked against the API before they are kept. Connecting opens the applications.
+- **Applications** (`/applications`): every application of the project with its status, type, traffic, errors, upstreams, instances,
+  restarts, CPU, memory and log errors; a namespace drop-down (several at once), namespace kinds, status chips and search. The old
+  `/services` addresses redirect here.
+- **Application** (`/applications/<name>`): span counts, errors and latency percentiles by span kind, a timeline, recent errors,
   spans and logs, and profile types, plus traffic in and out and CPU, memory and restarts from the metrics. Span figures
   cover the newest 1000 spans; the page says when that is less than the window.
 - **Map** (`/map`): who calls whom, drawn from the agents' connection, HTTP/gRPC and database counters; selecting a service
@@ -71,7 +74,7 @@ the `telemetry-ingest` Service. nginx resolves it per request, so the pod starts
 
 | Command | Covers |
 | --- | --- |
-| `make test-ui` | 400 Vitest tests (API client, session store, connection form, services list, service page, map logic and view, traces, trace, logs, profiles, alert rules, state, store, report; the alert service's config, auth, evaluator, notifications and an end-to-end run), lint, build |
+| `make test-ui` | 467 Vitest tests (API client, session store, connection form, services list, service page, map logic and view, traces, trace, logs, profiles, alert rules, state, store, report; the alert service's config, auth, evaluator, notifications and an end-to-end run), lint, build |
 | `make test-ui-chart` | chart rendering: off by default, service types, locked-down pod, no Secret |
 | `make test-ui-image` | the real image in front of a stub API: proxying, GET-only, blocked paths, the alerts path's routing, headers, read-only root, starts without its API |
 | `make test-telemetry-alerts-chart` | the alert service's chart template: locked-down pod, only `projects.json` mounted, settings, persistence |

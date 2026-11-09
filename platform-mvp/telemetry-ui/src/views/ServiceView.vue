@@ -85,11 +85,12 @@ watch(name, load)
 </script>
 
 <template>
+  <div class="page-head">
+    <div><p class="crumb"><router-link to="/applications">← Applications</router-link></p><h1 class="svc-title">{{ name }}</h1></div>
+  </div>
   <section class="panel">
-    <p class="crumb"><router-link to="/services">← Services</router-link></p>
-    <h2 class="svc-title">{{ name }}</h2>
     <p v-if="!connected" class="help">
-      Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.
+      Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.
     </p>
     <template v-else>
       <div class="toolbar">
@@ -101,7 +102,7 @@ watch(name, load)
       </div>
 
       <p v-if="allFailed" class="error" role="alert">
-        Nothing could be loaded: {{ Object.values(errors)[0] }} <router-link to="/">Check the connection.</router-link>
+        Nothing could be loaded: {{ Object.values(errors)[0] }} <router-link to="/connection">Check the connection.</router-link>
       </p>
       <template v-else-if="data">
         <p v-if="failed.length" class="warn" role="status">Not loaded: {{ failed.join(', ') }}. The page may be incomplete.</p>
@@ -136,7 +137,7 @@ watch(name, load)
                 <thead><tr><th>Service</th><th>Protocol</th><th>Rate</th><th>Errors</th><th>p95</th></tr></thead>
                 <tbody>
                   <tr v-for="e in list" :key="e.peer">
-                    <td class="name"><router-link v-if="!e.peer.startsWith('external:')" :to="{ name: 'service', params: { name: e.peer } }">{{ e.peerLabel }}</router-link><template v-else>{{ e.peerLabel }}</template></td>
+                    <td class="name"><router-link v-if="!e.peer.startsWith('external:')" :to="{ name: 'application', params: { name: e.peer } }">{{ e.peerLabel }}</router-link><template v-else>{{ e.peerLabel }}</template></td>
                     <td>{{ e.protocols.length ? e.protocols.join(', ') : 'tcp' }}</td>
                     <td>{{ edgeRate(e) }}</td>
                     <td :class="{ bad: e.errPct >= 5 }">{{ e.errPct.toFixed(1) }}% <span class="muted">({{ e.errBasis }})</span></td>

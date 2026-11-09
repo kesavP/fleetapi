@@ -18,7 +18,7 @@ const clientOf = (rows, fail) => ({
 async function mountAt(id, props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/traces', component: stub }, { path: '/logs', name: 'logs', component: stub }, { path: '/services/:name', name: 'service', component: stub }, { path: '/traces/:id', name: 'trace', component: TraceView }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/traces', component: stub }, { path: '/logs', name: 'logs', component: stub }, { path: '/applications/:name', name: 'application', component: stub }, { path: '/traces/:id', name: 'trace', component: TraceView }],
   })
   router.push(`/traces/${id}`)
   await router.isReady()

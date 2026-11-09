@@ -6,7 +6,7 @@ import MapView from './MapView.vue'
 const stub = { template: '<i/>' }
 const router = createRouter({
   history: createMemoryHistory(),
-  routes: [{ path: '/', component: stub }, { path: '/services/:name', name: 'service', component: stub }],
+  routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/applications/:name', name: 'application', component: stub }],
 })
 const session = (v = { project: 'gke', key: 'k' }) => ({ get: () => v })
 
@@ -85,7 +85,7 @@ describe('MapView', () => {
     expect(detail.text()).toContain('Calls out')
     expect(detail.text()).toContain('shop/cartservice')
     expect(detail.text()).not.toContain('Called by')
-    expect(detail.get('a').attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Ffrontend')
+    expect(detail.get('a').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')
     expect(fe.attributes('aria-pressed')).toBe('true')
     await fe.trigger('click')
     expect(w.find('.detail').exists()).toBe(false)

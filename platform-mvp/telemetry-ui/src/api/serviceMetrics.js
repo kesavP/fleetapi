@@ -1,5 +1,5 @@
 import { gauges, loadMap, rates } from '../map/load'
-import { workloadOf } from '../map/workload'
+import { podOf, workloadOf } from '../map/workload'
 
 // The metrics side of a service's page: who calls it and whom it calls (the map's edges for it), and what it uses (CPU,
 // memory, restarts). They are keyed by container, and the node-agent's naming rule turns a container id into the service name
@@ -50,7 +50,7 @@ export function summarizeResources(id, { cpu, cpuLimit, rss, memLimit, restarts,
   const [cpuS, cpuL, rssS, memL, rest, oomS] = [cpu, cpuLimit, rss, memLimit, restarts, oom].map(pick)
   const limit = (s) => (s && s.length ? sum(s, (x) => x.value) : null)
   return {
-    instances: rssS && rssS.length ? new Set(rssS.map((s) => s.labels.container_id)).size : null,
+    instances: rssS && rssS.length ? new Set(rssS.map((s) => podOf(s.labels.container_id))).size : null, // pods: a sidecar is not a second instance
     cpuCores: cpuS && cpuS.length ? sum(cpuS, (s) => s.rate) : null,
     cpuLimitCores: limit(cpuL && cpuL.filter((s) => s.value > 0)),
     memoryBytes: rssS && rssS.length ? sum(rssS, (s) => s.value) : null,

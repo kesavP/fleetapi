@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hostOf, histogramQuantile, isLoopback, isServerError, parseLe, workloadOf } from './workload'
+import { hostOf, histogramQuantile, isLoopback, isServerError, parseLe, podOf, workloadOf } from './workload'
 
 describe('workloadOf', () => {
   it.each([
@@ -66,5 +66,17 @@ describe('parseLe', () => {
     expect(parseLe('Inf')).toBe(Infinity)
     expect(parseLe('x')).toBeNaN()
     expect(parseLe(undefined)).toBeNaN()
+  })
+})
+
+describe('podOf', () => {
+  it('names the pod, so containers of one pod are one', () => {
+    expect(podOf('/k8s/shop/frontend-5d6f8c7b9-xk2lp/server')).toBe('/k8s/shop/frontend-5d6f8c7b9-xk2lp')
+    expect(podOf('/k8s/shop/frontend-5d6f8c7b9-xk2lp/istio-proxy')).toBe('/k8s/shop/frontend-5d6f8c7b9-xk2lp')
+    expect(podOf('/k8s/data/redis-0/redis')).toBe('/k8s/data/redis-0')
+    expect(podOf('/k8s-cronjob/ops/nightly/job')).toBe('/k8s-cronjob/ops/nightly')
+  })
+  it('is null for what is not a pod', () => {
+    for (const c of ['/system.slice/sshd.service', '', undefined, '/k8s/shop']) expect(podOf(c)).toBeNull()
   })
 })

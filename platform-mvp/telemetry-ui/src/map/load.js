@@ -102,10 +102,11 @@ export async function loadMap(client, { seconds, now = () => Date.now(), present
 }
 
 /**
- * The latest value of each series of a gauge: [{labels, value, last}], `last` being when it was last reported (ms). A series
- * that stopped reporting (a pod that is gone) is left out, or its last value would be counted as if it were still there.
+ * The latest value of every series of a gauge: [{labels, value, last, fresh}], `last` being when it was last reported (ms) and
+ * `fresh` whether that was within three steps of the end of the range (it is still reporting). A series that stopped (a pod that
+ * is gone) is KEPT here, marked not fresh: telling "gone" from "never existed" is what an inventory needs.
  */
-export async function gauges(client, metric, start, end) {
+export async function gaugeSeries(client, metric, start, end) {
   const step = Math.max(15, Math.floor((end - start) / 40))
   const data = (await client.get('metrics/query_range', { name: metric, from: start.toFixed(3), to: end.toFixed(3), step })) || {}
   const series = []
@@ -113,9 +114,18 @@ export async function gauges(client, metric, start, end) {
     const pts = s.points || []
     if (!pts.length) continue
     const lastPoint = pts.reduce((a, b) => (b.t > a.t ? b : a))
-    if (lastPoint.t >= end * 1000 - 3 * step * 1000) series.push({ labels: s.labels || {}, value: lastPoint.v, last: lastPoint.t })
+    series.push({ labels: s.labels || {}, value: lastPoint.v, last: lastPoint.t, fresh: lastPoint.t >= end * 1000 - 3 * step * 1000 })
   }
   return { series, truncated: !!data.truncated }
+}
+
+/**
+ * The latest value of each series of a gauge that is still reporting: [{labels, value, last}]. A series that stopped is left out,
+ * or its last value would be counted as if it were still there (see gaugeSeries to keep them).
+ */
+export async function gauges(client, metric, start, end) {
+  const { series, truncated } = await gaugeSeries(client, metric, start, end)
+  return { series: series.filter((s) => s.fresh).map(({ fresh, ...rest }) => (void fresh, rest)), truncated }
 }
 
 /**

@@ -21,6 +21,15 @@ export function workloadOf(containerId) {
   return null
 }
 
+/**
+ * The pod a container id belongs to ("/k8s/shop/frontend-5d6f8c7b9-xk2lp/server" -> "/k8s/shop/frontend-5d6f8c7b9-xk2lp"), so a
+ * pod with a sidecar counts once. A cronjob's id has no pod part and stands for itself; null for a host process.
+ */
+export function podOf(containerId) {
+  const m = /^(\/k8s(?:-cronjob)?\/[a-z0-9-]+\/[a-z0-9-]+)\/.+/.exec(String(containerId || ''))
+  return m ? m[1] : null
+}
+
 /** The host part of "ip:port", "[ipv6]:port" or "name:port"; a bare address is returned as it is. */
 export function hostOf(address) {
   const a = String(address || '').trim()

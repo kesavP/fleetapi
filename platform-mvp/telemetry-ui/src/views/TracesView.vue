@@ -70,9 +70,9 @@ onMounted(() => {
 </script>
 
 <template>
+  <div class="page-head"><h1>Traces</h1></div>
   <section class="panel">
-    <h2>Traces</h2>
-    <p v-if="!connected" class="help">Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.</p>
+    <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p class="help">
         Spans the node-agents recorded, newest first. The node-agent records each request as its own span, so a span is usually a
@@ -93,7 +93,7 @@ onMounted(() => {
         <div><button type="submit" :disabled="loading || !!problem">{{ loading ? 'Searching…' : 'Search' }}</button></div>
       </form>
       <p v-if="problem" class="error" role="alert">{{ problem }}</p>
-      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/">Check the connection.</router-link></p>
+      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/connection">Check the connection.</router-link></p>
       <template v-else-if="searched">
         <p v-if="!rows.length && !loading" class="help">No spans match in this window. Widen it, or loosen a filter.</p>
         <p v-if="full" class="warn" role="status">Showing the newest {{ f.limit }} spans; more match. Narrow the window or add a filter to see the rest.</p>
@@ -102,7 +102,7 @@ onMounted(() => {
           <tbody>
             <tr v-for="s in rows" :key="s.span_id">
               <td>{{ dateTime(s.time) }}</td>
-              <td class="name"><router-link :to="{ name: 'service', params: { name: s.service } }">{{ s.service }}</router-link></td>
+              <td class="name"><router-link :to="{ name: 'application', params: { name: s.service } }">{{ s.service }}</router-link></td>
               <td class="name">{{ s.name }}</td>
               <td>{{ (s.kind || '').toLowerCase() }}</td>
               <td>{{ formatDuration(s.duration_ns) }}</td>

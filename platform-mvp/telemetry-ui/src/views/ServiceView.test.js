@@ -29,16 +29,16 @@ async function mountAt(name, props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', component: stub },
-      { path: '/services', component: stub },
-      { path: '/services/:name', name: 'service', component: ServiceView },
+      { path: '/', component: stub }, { path: '/connection', component: stub },
+      { path: '/applications', component: stub },
+      { path: '/applications/:name', name: 'application', component: ServiceView },
       { path: '/traces', name: 'traces', component: stub },
       { path: '/traces/:id', name: 'trace', component: stub },
       { path: '/logs', name: 'logs', component: stub },
       { path: '/profiles', name: 'profiles', component: stub },
     ],
   })
-  router.push(`/services/${name}`)
+  router.push(`/applications/${name}`)
   await router.isReady()
   const w = mount(ServiceView, { props: { client: clientOf(), session: session(), ...props }, global: { plugins: [router] } })
   await flushPromises()
@@ -154,7 +154,7 @@ describe('ServiceView', () => {
 
     it('links a caller to its own page', async () => {
       const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient() })
-      expect(w.get('[data-table=in] a').attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Ffrontend')
+      expect(w.get('[data-table=in] a').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')
     })
 
     it('does not query metrics for a name that is not a Kubernetes workload, and says why', async () => {

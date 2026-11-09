@@ -101,12 +101,12 @@ const label = (n) => `${n.name} — ${formatValue(n.value, unit.value)} (${share
 </script>
 
 <template>
+  <div class="page-head"><h1>Profiles</h1></div>
   <section class="panel">
-    <h2>Profiles</h2>
-    <p v-if="!connected" class="help">Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.</p>
+    <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p class="help">Where a service spends its CPU or memory, from the node-agents' continuous profiles. Wider means more.</p>
-      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/">Check the connection.</router-link></p>
+      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/connection">Check the connection.</router-link></p>
       <p v-else-if="ready && !services.length" class="help">No profiles in this project yet. Are the node-agents sending profiles?</p>
       <form v-if="services.length" class="filters" @submit.prevent="load">
         <div><label for="service">Service</label>

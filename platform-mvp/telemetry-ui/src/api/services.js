@@ -1,6 +1,5 @@
-// The services a project has, put together from what the API offers: it has no list of its own, so the names
-// come from the traces, the logs and the profiles. A service seen in any of them is listed, with a flag for
-// each signal it has. One source failing does not hide the others: its error is returned beside the list.
+// What one application's page needs (its spans, logs and profiles), and the time windows every page offers.
+// The list of applications is built in applications.js.
 
 export const WINDOWS = [
   { label: '15 minutes', seconds: 15 * 60 },
@@ -8,49 +7,6 @@ export const WINDOWS = [
   { label: '6 hours', seconds: 6 * 60 * 60 },
   { label: '24 hours', seconds: 24 * 60 * 60 },
 ]
-
-const SOURCES = ['traces', 'logs', 'profiles']
-
-function entry(map, name) {
-  if (!map.has(name)) map.set(name, { name, traces: false, logs: false, profiles: [] })
-  return map.get(name)
-}
-
-/** The merged, name-sorted list from three source answers (each an array, null or missing). Pure. */
-export function mergeServices({ traces, logs, profiles }) {
-  const map = new Map()
-  for (const name of traces || []) if (name) entry(map, name).traces = true
-  for (const name of logs || []) if (name) entry(map, name).logs = true
-  for (const p of profiles || []) {
-    if (!p || !p.service) continue
-    const e = entry(map, p.service)
-    if (p.type && !e.profiles.includes(p.type)) e.profiles.push(p.type)
-  }
-  for (const e of map.values()) e.profiles.sort()
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name))
-}
-
-/**
- * Loads the three sources for the last `seconds` seconds (profiles are not time-bound in the API: every
- * profiled service is listed). Returns {services, errors}, where errors maps a source to its message.
- */
-export async function loadServices(client, { seconds, now = () => Date.now() } = {}) {
-  const to = Math.floor(now() / 1000)
-  const range = { from: to - seconds, to }
-  const calls = {
-    traces: () => client.get('traces/services', range),
-    logs: () => client.get('logs/services', range),
-    profiles: () => client.get('profiles'),
-  }
-  const settled = await Promise.allSettled(SOURCES.map((s) => calls[s]()))
-  const answers = {}
-  const errors = {}
-  settled.forEach((r, i) => {
-    if (r.status === 'fulfilled') answers[SOURCES[i]] = r.value
-    else errors[SOURCES[i]] = r.reason && r.reason.message ? r.reason.message : 'failed'
-  })
-  return { services: mergeServices(answers), errors }
-}
 
 /**
  * Everything one service's page needs, for the last `seconds` seconds. The three calls are independent: one

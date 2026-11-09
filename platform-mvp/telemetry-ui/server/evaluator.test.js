@@ -79,6 +79,23 @@ describe('evaluator', () => {
     expect(c.logs.some((l) => l.msg === 'alert firing' && l.rule === 'errors' && l.project === 'gke')).toBe(true)
   })
 
+  it('says once that it is checking, and again after a failure is over, not on every check', async () => {
+    const c = setup()
+    const oks = () => c.logs.filter((l) => l.msg === 'check ok')
+    await c.step()
+    expect(oks()).toEqual([{ level: 'info', msg: 'check ok', project: 'gke', services: 3, firing: 0, skipped: 0 }])
+    await c.step()
+    await c.step()
+    expect(oks()).toHaveLength(1) // a healthy service stays quiet
+    c.fail.gke = 'down'
+    await c.step()
+    await c.step()
+    expect(oks()).toHaveLength(1)
+    delete c.fail.gke
+    await c.step()
+    expect(oks()).toHaveLength(2) // it is back
+  })
+
   it('resolves after two clear checks', async () => {
     const c = setup()
     c.conditions.gke = [cond()]

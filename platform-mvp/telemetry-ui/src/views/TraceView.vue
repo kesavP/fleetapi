@@ -47,10 +47,11 @@ watch(id, load)
 </script>
 
 <template>
+  <div class="page-head">
+    <div><p class="crumb"><router-link to="/traces">← Traces</router-link></p><h1 class="svc-title" :title="id">Trace {{ id.slice(0, 8) }}…</h1></div>
+  </div>
   <section class="panel">
-    <p class="crumb"><router-link to="/traces">← Traces</router-link></p>
-    <h2 class="svc-title" :title="id">Trace {{ id.slice(0, 8) }}…</h2>
-    <p v-if="!connected" class="help">Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.</p>
+    <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <p v-else-if="error" class="error" role="alert">{{ error }}</p>
     <p v-else-if="loading" class="help">Loading…</p>
     <template v-else-if="spans">
@@ -75,7 +76,7 @@ watch(id, load)
         <section v-if="current" class="detail" aria-live="polite">
           <h3>{{ current.span.name }}</h3>
           <dl class="kv">
-            <div><dt>Service</dt><dd><router-link :to="{ name: 'service', params: { name: current.span.service } }">{{ current.span.service }}</router-link></dd></div>
+            <div><dt>Service</dt><dd><router-link :to="{ name: 'application', params: { name: current.span.service } }">{{ current.span.service }}</router-link></dd></div>
             <div><dt>Started</dt><dd>{{ dateTime(current.span.time) }}</dd></div>
             <div><dt>Duration</dt><dd>{{ formatDuration(current.span.duration_ns) }}</dd></div>
             <div><dt>Kind</dt><dd>{{ (current.span.kind || '').toLowerCase() }}</dd></div>

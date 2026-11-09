@@ -376,12 +376,17 @@ build-telemetry-ingest-image:
 	docker build -t $(TI_IMAGE) $(TI_DIR)
 
 # Not part of build-images: the UI and the alert service are opt-in, like the service they read.
+# An empty DOCKER_REGISTRY or IMAGE_TAG (an unset shell variable passed on the command line, as in DOCKER_REGISTRY=$REG) would
+# make the image name "/telemetry-ui:", which Docker rejects with a message that does not say why. Say it here instead.
+need-image-name = $(if $(and $(strip $(DOCKER_REGISTRY)),$(strip $(IMAGE_TAG))),,$(error DOCKER_REGISTRY and IMAGE_TAG must not be empty (got "$(DOCKER_REGISTRY)" and "$(IMAGE_TAG)"): is the shell variable you passed set? try `echo $$REG`))
 .PHONY: build-telemetry-ui-image push-telemetry-ui build-telemetry-alerts-image push-telemetry-alerts
 build-telemetry-ui-image:
+	$(need-image-name)
 	@echo "==> Building $(UI_IMAGE)"
 	docker build -t $(UI_IMAGE) $(UI_DIR)
 
 build-telemetry-alerts-image:
+	$(need-image-name)
 	@echo "==> Building $(ALERTS_IMAGE)"
 	docker build -f $(UI_DIR)/Dockerfile.alerts -t $(ALERTS_IMAGE) $(UI_DIR)
 
@@ -421,8 +426,10 @@ push-alert-router:
 push-telemetry-ingest:
 	docker push $(TI_IMAGE)
 push-telemetry-ui:
+	$(need-image-name)
 	docker push $(UI_IMAGE)
 push-telemetry-alerts:
+	$(need-image-name)
 	docker push $(ALERTS_IMAGE)
 
 push-images-parallel:

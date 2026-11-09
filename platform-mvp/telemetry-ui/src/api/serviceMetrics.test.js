@@ -69,6 +69,13 @@ describe('summarizeResources', () => {
     expect(out.cpuCores).toBeCloseTo(0.3, 9)
   })
 
+  it('counts pods, not containers: a sidecar is not a second instance', () => {
+    const sidecar = '/k8s/shop/b-5d6f8c7b9-xk2lp/istio-proxy'
+    const out = summarizeResources('/k8s/shop/b', { rss: [g(POD1, 100), g(sidecar, 50), g(POD2, 100)] }, 60)
+    expect(out.instances).toBe(2) // POD1 (with its sidecar) and POD2
+    expect(out.memoryBytes).toBe(250) // but the memory of every container counts
+  })
+
   it('treats a limit of 0 (none set) as no limit', () => {
     const out = summarizeResources('/k8s/shop/b', { rss: [g(POD1, 1)], cpuLimit: [g(POD1, 0)], memLimit: [g(POD1, 0)] }, 60)
     expect(out.cpuLimitCores).toBeNull()

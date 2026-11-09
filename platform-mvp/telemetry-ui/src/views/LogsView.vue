@@ -68,9 +68,9 @@ onMounted(() => {
 </script>
 
 <template>
+  <div class="page-head"><h1>Logs</h1></div>
   <section class="panel">
-    <h2>Logs</h2>
-    <p v-if="!connected" class="help">Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.</p>
+    <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p class="help">Log lines the node-agents collected, newest first.</p>
       <form class="filters" @submit.prevent="search">
@@ -87,7 +87,7 @@ onMounted(() => {
         <div><button type="submit" :disabled="loading || !!problem">{{ loading ? 'Searching…' : 'Search' }}</button></div>
       </form>
       <p v-if="problem" class="error" role="alert">{{ problem }}</p>
-      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/">Check the connection.</router-link></p>
+      <p v-if="error" class="error" role="alert">{{ error }} <router-link to="/connection">Check the connection.</router-link></p>
       <template v-else-if="searched">
         <p v-if="!rows.length && !loading" class="help">No log lines match in this window. Widen it, or loosen a filter.</p>
         <p v-if="full" class="warn" role="status">Showing the newest {{ f.limit }} lines; more match. Narrow the window or add a filter to see the rest.</p>
@@ -96,7 +96,7 @@ onMounted(() => {
             <div class="log-head">
               <time>{{ dateTime(l.time) }}</time>
               <span class="tag" :data-sev="severityClass(l)">{{ l.severity || '—' }}</span>
-              <router-link class="name" :to="{ name: 'service', params: { name: l.service } }">{{ l.service }}</router-link>
+              <router-link class="name" :to="{ name: 'application', params: { name: l.service } }">{{ l.service }}</router-link>
               <router-link v-if="l.trace_id" class="name" :to="{ name: 'trace', params: { id: l.trace_id } }" :title="l.trace_id">trace {{ shortId(l.trace_id) }}</router-link>
             </div>
             <pre class="log-body">{{ l.body }}</pre>

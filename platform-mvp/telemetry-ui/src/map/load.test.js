@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listenAddresses, loadMap, rates } from './load'
+import { gaugeSeries, gauges, listenAddresses, loadMap, rates } from './load'
 
 const START = 1_700_000_040 // a multiple of 15 s, so a 600 s range is exactly 40 buckets of 15 s
 const END = START + 600
@@ -135,5 +135,29 @@ describe('loadMap', () => {
     const r = await loadMap(clientOf({ names: ['up'] }), { seconds: 600, now: NOW })
     expect(r.edges).toEqual([])
     expect(r.hasData).toBe(false)
+  })
+})
+
+describe('gaugeSeries / gauges', () => {
+  const NOW_END = START + 600
+  const at = (t) => [{ t: t * 1000, v: 7 }]
+  const client = {
+    get: async () => ({
+      series: [
+        { labels: { container_id: 'live' }, points: at(NOW_END - 5) },
+        { labels: { container_id: 'gone' }, points: at(START + 30) }, // stopped reporting long before the end
+        { labels: { container_id: 'empty' }, points: [] },
+      ],
+    }),
+  }
+  it('keeps every series, saying which are still reporting', async () => {
+    const r = await gaugeSeries(client, 'm', START, NOW_END)
+    expect(r.series.map((s) => [s.labels.container_id, s.fresh, s.value])).toEqual([['live', true, 7], ['gone', false, 7]])
+  })
+  it('gauges leaves out the ones that stopped, as before', async () => {
+    const r = await gauges(client, 'm', START, NOW_END)
+    expect(r.series.map((s) => s.labels.container_id)).toEqual(['live'])
+    expect(r.series[0]).not.toHaveProperty('fresh')
+    expect(r.series[0].last).toBe((NOW_END - 5) * 1000)
   })
 })
