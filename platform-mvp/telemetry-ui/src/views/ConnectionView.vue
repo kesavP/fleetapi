@@ -13,6 +13,5 @@ function connected() {
 </script>
 
 <template>
-  <div class="page-head"><h1>Connection</h1></div>
   <ConnectionPanel @connected="connected" @disconnected="alerts && alerts.reset()" />
 </template>

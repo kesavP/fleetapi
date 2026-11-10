@@ -19,6 +19,8 @@ import (
 type Resolver interface {
 	IngestProject(key string) (string, bool)
 	ReadProject(key string) (string, bool)
+	// ManageProject: the project a key may change the incidents of. A key is valid for exactly one kind of access.
+	ManageProject(key string) (string, bool)
 }
 
 type Sink interface {

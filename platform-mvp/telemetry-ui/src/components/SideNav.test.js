@@ -6,18 +6,18 @@ import SideNav from './SideNav.vue'
 import { createSession } from '../api/session'
 
 const stub = { template: '<i/>' }
-const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/connection']
+const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/incidents', '/incidents/:id', '/configuration/connection', '/configuration/clickhouse']
 
 function memoryStorage() {
   const m = new Map()
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
 }
 
-async function mountNav({ at = '/applications', session = createSession(memoryStorage()), alerts = null } = {}) {
+async function mountNav({ at = '/applications', session = createSession(memoryStorage()), alerts = null, build = null } = {}) {
   const router = createRouter({ history: createMemoryHistory(), routes: PATHS.map((path) => ({ path, component: stub })) })
   router.push(at)
   await router.isReady()
-  const w = mount(SideNav, { props: { session, alerts }, global: { plugins: [router] } })
+  const w = mount(SideNav, { props: { session, alerts, build }, global: { plugins: [router] } })
   await flushPromises()
   return { w, router, session }
 }
@@ -36,6 +36,7 @@ describe('SideNav', () => {
       ['Logs', '/logs'],
       ['Profiles', '/profiles'],
       ['Alerts', '/alerts'],
+      ['Incidents', '/incidents'],
     ])
     expect(w.get('nav').attributes('aria-label')).toBe('Main menu')
   })
@@ -53,9 +54,13 @@ describe('SideNav', () => {
     const trace = await mountNav({ at: `/traces/${'a'.repeat(32)}` })
     expect(items(trace.w).filter((i) => i.classes().includes('active')).map((i) => i.text())).toEqual(['Traces'])
     expect(items(trace.w).filter((i) => i.attributes('aria-current') === 'page').map((i) => i.text())).toEqual(['Traces'])
-    const conn = await mountNav({ at: '/connection' })
+    const inc = await mountNav({ at: '/incidents/abc12345' })
+    expect(items(inc.w).filter((i) => i.classes().includes('active')).map((i) => i.text())).toEqual(['Incidents'])
+    const conn = await mountNav({ at: '/configuration/connection' })
     expect(items(conn.w).some((i) => i.classes().includes('active'))).toBe(false) // the project link below is the one lit
     expect(conn.w.get('.foot .project').classes()).toContain('active')
+    const ch = await mountNav({ at: '/configuration/clickhouse' })
+    expect(ch.w.get('.foot .project').classes()).toContain('active') // the ClickHouse tab is under the project too
     const lookalike = await mountNav({ at: '/mapping' })
     expect(items(lookalike.w).some((i) => i.classes().includes('active'))).toBe(false) // "/map" is not a prefix of "/mapping"
     void lookalike
@@ -77,7 +82,7 @@ describe('SideNav', () => {
     s.set({ project: 'dc1', key: 'k' })
     const { w } = await mountNav({ session: s })
     expect(w.get('[data-testid=project]').text()).toBe('dc1')
-    expect(w.get('.foot .project').attributes('href')).toBe('/connection')
+    expect(w.get('.foot .project').attributes('href')).toBe('/configuration/connection')
   })
 
   it('never shows the key', async () => {
@@ -126,5 +131,34 @@ describe('SideNav', () => {
     const icons = w.findAll('svg.icon')
     expect(icons.length).toBeGreaterThanOrEqual(8)
     expect(icons.every((i) => i.attributes('aria-hidden') === 'true')).toBe(true)
+  })
+
+  it('says which build it is at the foot of the menu, with the commit and the day, and the whole of it as a tooltip', async () => {
+    const { w } = await mountNav({ build: { name: 'telemetry-ui', version: 'v19', commit: '3f9a1c2d4e5b6789', built: '2026-11-10T07:30:00Z' } })
+    const v = w.get('.foot [data-testid=version]')
+    expect(v.text()).toContain('telemetry-ui')
+    expect(v.get('strong').text()).toBe('v19')
+    expect(v.get('small').text()).toBe('3f9a1c2d4e5b · 2026-11-10')
+    expect(v.attributes('title')).toBe('telemetry-ui v19 · commit 3f9a1c2d4e5b6789 · built 2026-11-10 07:30 UTC')
+  })
+
+  it('says it is a development build when it was built without a version, and shows no second line it cannot fill', async () => {
+    const { w } = await mountNav({ build: { name: 'telemetry-ui', version: 'dev', commit: '', built: '' } })
+    const v = w.get('[data-testid=version]')
+    expect(v.get('strong').text()).toBe('dev')
+    expect(v.find('small').exists()).toBe(false)
+  })
+
+  it('shows the build the test run was built as when none is given, and keeps it out of the menu entries', async () => {
+    const { w } = await mountNav()
+    expect(w.get('[data-testid=version] strong').text().length).toBeGreaterThan(0)
+    expect(items(w).map((i) => i.text())).not.toContain('dev')
+    expect(w.findAll('.item').every((i) => !i.find('[data-testid=version]').exists())).toBe(true)
+  })
+
+  it('puts the version in as text, never as markup', async () => {
+    const { w } = await mountNav({ build: { name: 'telemetry-ui', version: '<img src=x onerror=alert(1)>', commit: '', built: '' } })
+    expect(w.find('img').exists()).toBe(false)
+    expect(w.get('[data-testid=version] strong').text()).toBe('<img src=x onerror=alert(1)>')
   })
 })

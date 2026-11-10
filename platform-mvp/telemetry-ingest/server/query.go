@@ -29,6 +29,9 @@ type Query struct {
 	DefaultRange time.Duration
 	MaxSeries    int
 	MaxPoints    int
+	// ShareClusterInfo adds the whole-table sizes and the server's disks to /clickhouse. They describe the platform every project shares, so
+	// they are off unless the operator asks for them (--expose-cluster-info).
+	ShareClusterInfo bool
 }
 
 type paramError string
@@ -47,6 +50,12 @@ func (q *Query) Register(mux *http.ServeMux) {
 	mux.HandleFunc(base+"logs", q.wrap(q.searchLogs))
 	mux.HandleFunc(base+"profiles", q.wrap(q.listProfiles))
 	mux.HandleFunc(base+"profiles/top", q.wrap(q.topStacks))
+	mux.HandleFunc(base+"clickhouse", q.wrap(q.clickhouseInfo))
+	mux.HandleFunc(base+"databases", q.wrap(q.listDatabases))
+	mux.HandleFunc(base+"databases/{target}/statements", q.wrap(q.databaseStatements))
+	mux.HandleFunc(base+"databases/{target}/activity", q.wrap(q.databaseActivity))
+	mux.HandleFunc(base+"databases/{target}/slow", q.wrap(q.databaseSlow))
+	mux.HandleFunc(base+"databases/{target}/pools", q.wrap(q.databasePools))
 }
 
 type queryFunc func(ctx context.Context, project string, w http.ResponseWriter, r *http.Request) (any, error)
@@ -269,6 +278,12 @@ func (q *Query) searchLogs(ctx context.Context, project string, _ http.ResponseW
 		Contains: v.Get("q"), TraceID: strings.ToLower(v.Get("trace_id")),
 		From: from, To: to, Limit: limit,
 	})
+}
+
+// clickhouseInfo: how the service is connected to ClickHouse and how much this project stores there. The address and credentials are not in
+// the answer (see store.ClickHouseInfo).
+func (q *Query) clickhouseInfo(ctx context.Context, project string, _ http.ResponseWriter, _ *http.Request) (any, error) {
+	return q.Reader.ClickHouseInfo(ctx, project, q.ShareClusterInfo)
 }
 
 func (q *Query) listProfiles(ctx context.Context, project string, _ http.ResponseWriter, _ *http.Request) (any, error) {

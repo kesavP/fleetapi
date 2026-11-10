@@ -1,25 +1,25 @@
 <script setup>
 import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
+import TelemetryNotice from '../components/TelemetryNotice.vue'
 import { useRoute, useRouter } from 'vue-router'
+import CategoryFilter from '../components/CategoryFilter.vue'
 import NamespacePicker from '../components/NamespacePicker.vue'
+import { createCategoryStore } from '../categories'
 import { WINDOWS } from '../api/services'
 import { STATUSES, alertLevels, loadApplications, namespacesOf, statusOf } from '../api/applications'
 import { formatBytes } from '../format'
 
 // Takes the client, session and alert store by injection so a test can hand it fakes.
-const props = defineProps({ client: { type: Object, default: null }, session: { type: Object, default: null }, alerts: { type: Object, default: null } })
+const props = defineProps({ client: { type: Object, default: null }, session: { type: Object, default: null }, alerts: { type: Object, default: null }, categories: { type: Object, default: null }, appCache: { type: Object, default: null } })
 const client = props.client || inject('client')
 const session = props.session || inject('session')
 const alerts = props.alerts || inject('alerts', null)
+const store = props.categories || inject('categories', null) || createCategoryStore({ session, storage: null })
+const appCache = props.appCache || inject('appCache', null)
 const route = useRoute()
 const router = useRouter()
 
 const connected = computed(() => session.get())
-const CATEGORIES = [
-  { key: 'application', label: 'application' },
-  { key: 'control-plane', label: 'control-plane' },
-  { key: 'monitoring', label: 'monitoring' },
-]
 const PAGE_SIZES = [25, 50, 100]
 
 // The choices live in the address, so a view can be shared, bookmarked and reached with the back button.
@@ -29,7 +29,7 @@ const f = reactive({
   seconds: [0, ...WINDOWS.map((w) => w.seconds)].includes(Number(q.window)) && Number(q.window) ? Number(q.window) : WINDOWS[1].seconds,
   search: String(q.q || ''),
   namespaces: list(q.ns),
-  categories: list(q.cat).filter((c) => CATEGORIES.some((x) => x.key === c)).length ? list(q.cat).filter((c) => CATEGORIES.some((x) => x.key === c)) : ['application'],
+  categories: list(q.cat).filter((c) => store.all().includes(c)).length ? list(q.cat).filter((c) => store.all().includes(c)) : ['application'],
   statuses: list(q.status).filter((s) => STATUSES.some((x) => x.key === s)),
   pageSize: PAGE_SIZES.includes(Number(q.rows)) ? Number(q.rows) : 50,
 })
@@ -40,14 +40,18 @@ const loading = ref(false)
 const error = ref('')
 
 const levels = computed(() => alertLevels(alerts ? alerts.state.alerts : []))
-const apps = computed(() => (data.value ? data.value.apps.map((a) => ({ ...a, status: statusOf(a, levels.value.get(a.id)) })) : []))
+// An application's category is where its namespace puts it, or where the user moved it to (see categories.js).
+const apps = computed(() => (data.value ? data.value.apps.map((a) => ({ ...a, category: store.categoryFor(a.id, a.category), status: statusOf(a, levels.value.get(a.id)) })) : []))
 const inCategory = computed(() => apps.value.filter((a) => f.categories.includes(a.category)))
 const namespaces = computed(() => namespacesOf(inCategory.value))
 // What is in scope before the status chips: category, namespace choice and search. The chips count and then narrow this.
+// A namespace chosen earlier but no longer on offer (its kind was switched off) is not a choice any more: the picker shows "all" for it,
+// so the table must too.
+const chosen = computed(() => f.namespaces.filter((n) => namespaces.value.some((x) => x.name === n)))
 const scoped = computed(() => {
   const term = f.search.trim().toLowerCase()
   return inCategory.value.filter(
-    (a) => (!f.namespaces.length || f.namespaces.includes(a.namespace)) && (!term || a.name.toLowerCase().includes(term) || a.namespace.toLowerCase().includes(term)),
+    (a) => (!chosen.value.length || chosen.value.includes(a.namespace)) && (!term || a.name.toLowerCase().includes(term) || a.namespace.toLowerCase().includes(term)),
   )
 })
 const counts = computed(() => Object.fromEntries(STATUSES.map((s) => [s.key, scoped.value.filter((a) => a.status === s.key).length])))
@@ -76,13 +80,16 @@ function remember() {
   router.replace({ query })
 }
 
-async function load() {
+async function load(force = false) {
   if (!connected.value) return
   loading.value = true
   error.value = ''
   remember()
   try {
-    data.value = await loadApplications(client, { seconds: f.seconds })
+    // Through the short cache when there is one (the Map's hover menu reads the same data); Refresh reads afresh.
+    data.value = await (appCache
+      ? appCache.get(client, { project: connected.value.project, seconds: f.seconds, force: force === true })
+      : loadApplications(client, { seconds: f.seconds }))
   } catch (e) {
     error.value = e.message
     data.value = null
@@ -93,11 +100,10 @@ async function load() {
 onMounted(load)
 
 const toggleStatus = (key) => (f.statuses = f.statuses.includes(key) ? f.statuses.filter((s) => s !== key) : [...f.statuses, key])
-function toggleCategory(key, event) {
-  const next = f.categories.includes(key) ? f.categories.filter((c) => c !== key) : [...f.categories, key]
-  f.categories = next.length ? next : f.categories // at least one stays on: none would hide everything
-  // The browser has already flipped the box. When the state refused the change nothing re-renders, so put the box back.
-  event.target.checked = f.categories.includes(key)
+// A category made from here is shown at once: making one and not seeing it would look like nothing happened.
+function addCategory(name) {
+  const made = store.add(name)
+  if (made && !f.categories.includes(made)) f.categories = [...f.categories, made]
 }
 
 const num = (x) => (x >= 100 ? String(Math.round(x)) : x >= 10 ? x.toFixed(1) : x.toFixed(2))
@@ -114,11 +120,12 @@ const label = (key) => STATUSES.find((s) => s.key === key).label
       <select id="window" v-model.number="f.seconds" @change="load">
         <option v-for="w in WINDOWS" :key="w.seconds" :value="w.seconds">Last {{ w.label }}</option>
       </select>
-      <button type="button" class="secondary" :disabled="loading" @click="load">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+      <button type="button" class="secondary" :disabled="loading" @click="load(true)">{{ loading ? 'Loading…' : 'Refresh' }}</button>
     </div>
   </div>
 
   <section class="panel flush">
+    <TelemetryNotice />
     <p v-if="!connected" class="help pad">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <div class="filter-row">
@@ -127,9 +134,7 @@ const label = (key) => STATUSES.find((s) => s.key === key).label
           <input v-model="f.search" type="search" placeholder="search" aria-label="Search applications" autocomplete="off" />
         </div>
         <NamespacePicker v-model="f.namespaces" :namespaces="namespaces" />
-        <div class="cats" role="group" aria-label="Kinds of namespace">
-          <label v-for="c in CATEGORIES" :key="c.key" class="cat"><input type="checkbox" :checked="f.categories.includes(c.key)" @change="toggleCategory(c.key, $event)" /> {{ c.label }}</label>
-        </div>
+        <CategoryFilter v-model="f.categories" :categories="store.all()" :validate="store.problem" @add="addCategory" />
       </div>
 
       <div class="chips" role="group" aria-label="Filter by status">

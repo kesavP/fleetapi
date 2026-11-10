@@ -300,6 +300,7 @@ func TestProfilesNeedServiceName(t *testing.T) {
 
 type fakeReader struct {
 	store.Reader
+	gotShare   bool
 	gotProject string
 	gotMetric  store.MetricQuery
 	gotSpan    store.SpanQuery
@@ -322,6 +323,15 @@ func (f *fakeReader) GetTrace(context.Context, string, string) ([]model.Span, er
 }
 func (f *fakeReader) TopStacks(context.Context, store.ProfileQuery) ([]store.StackValue, error) {
 	return []store.StackValue{{Frames: []string{"leaf", "mid", "root"}, Value: 7}}, nil
+}
+
+func (f *fakeReader) ClickHouseInfo(_ context.Context, p string, share bool) (store.ClickHouseInfo, error) {
+	f.gotProject, f.gotShare = p, share
+	return store.ClickHouseInfo{
+		Connection: store.ChConnection{Reachable: true, Protocol: "native", Database: "telemetry", Version: "24.8.1", PingMs: 1.5},
+		Storage:    []store.ChStorage{{Type: "logs", Rows: 3}},
+		Warnings:   []string{},
+	}, nil
 }
 
 func queryServer(t *testing.T, r *fakeReader) *httptest.Server {
@@ -469,5 +479,61 @@ func TestFromZeroIsPassedToTheReader(t *testing.T) {
 	}
 	if code, _ := get(t, u, usRead); code != 200 || fr.gotMetric.FromZero {
 		t.Fatalf("from_zero must be off unless asked for: %+v", fr.gotMetric)
+	}
+}
+
+func TestClickHouseInfoIsScopedToTheKeysProject(t *testing.T) {
+	fr := &fakeReader{}
+	srv := queryServer(t, fr)
+	base := srv.URL + "/api/v1/projects/"
+	for name, c := range map[string]struct {
+		path, key string
+		want      int
+	}{
+		"no key":          {"us/clickhouse", "", 401},
+		"ingest key":      {"us/clickhouse", usIngest, 403},
+		"another project": {"us/clickhouse", euRead, 403},
+		"unknown project": {"nosuch/clickhouse", usRead, 403},
+	} {
+		if code, _ := get(t, base+c.path, c.key); code != c.want {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	if fr.gotProject != "" {
+		t.Fatal("the reader was called for a rejected request")
+	}
+	code, body := get(t, base+"us/clickhouse", usRead)
+	if code != 200 || fr.gotProject != "us" || !strings.Contains(body, `"version":"24.8.1"`) || !strings.Contains(body, `"data":{`) {
+		t.Fatalf("%d %s (project %q)", code, body, fr.gotProject)
+	}
+}
+
+func TestClickHouseInfoSharesClusterDetailsOnlyWhenTheOperatorAsked(t *testing.T) {
+	for _, share := range []bool{false, true} {
+		fr := &fakeReader{}
+		mux := http.NewServeMux()
+		(&Query{Projects: registry(t), Reader: fr, Log: quiet, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 1000, ShareClusterInfo: share}).Register(mux)
+		srv := httptest.NewServer(mux)
+		if code, body := get(t, srv.URL+"/api/v1/projects/us/clickhouse", usRead); code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+		if fr.gotShare != share {
+			t.Errorf("share %v reached the reader as %v", share, fr.gotShare)
+		}
+		srv.Close()
+	}
+}
+
+func TestClickHouseInfoIsReadOnly(t *testing.T) {
+	srv := queryServer(t, &fakeReader{})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/projects/us/clickhouse", nil)
+	req.Header.Set("Authorization", "Bearer "+usRead)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("a project key must not be able to change the database settings: %d", resp.StatusCode)
 	}
 }

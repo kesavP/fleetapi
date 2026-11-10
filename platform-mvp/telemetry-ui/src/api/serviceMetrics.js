@@ -1,5 +1,6 @@
 import { gauges, loadMap, rates } from '../map/load'
-import { podOf, workloadOf } from '../map/workload'
+import { DNS_METRIC, summarizeDns } from './dns'
+import { instanceOf, workloadForId, workloadOf } from '../map/workload'
 
 // The metrics side of a service's page: who calls it and whom it calls (the map's edges for it), and what it uses (CPU,
 // memory, restarts). They are keyed by container, and the node-agent's naming rule turns a container id into the service name
@@ -12,8 +13,8 @@ export const MEM_LIMIT = 'container_resources_memory_limit_bytes'
 export const RESTARTS = 'container_restarts_total'
 export const OOM = 'container_oom_kills_total'
 
-/** Only containers the node-agent names as a pod workload have metrics keyed this way. */
-export const hasMetrics = (name) => workloadOf(`${name}/x`) !== null
+/** Only an application id (a Kubernetes workload, or a unit or container on a plain host) has metrics keyed this way. */
+export const hasMetrics = (name) => workloadForId(name) !== null
 
 const mine = (id) => (s) => {
   const w = workloadOf(s.labels.container_id)
@@ -50,7 +51,7 @@ export function summarizeResources(id, { cpu, cpuLimit, rss, memLimit, restarts,
   const [cpuS, cpuL, rssS, memL, rest, oomS] = [cpu, cpuLimit, rss, memLimit, restarts, oom].map(pick)
   const limit = (s) => (s && s.length ? sum(s, (x) => x.value) : null)
   return {
-    instances: rssS && rssS.length ? new Set(rssS.map((s) => podOf(s.labels.container_id))).size : null, // pods: a sidecar is not a second instance
+    instances: rssS && rssS.length ? new Set(rssS.map((s) => instanceOf(s.labels))).size : null, // pods or machines: a sidecar is not a second instance
     cpuCores: cpuS && cpuS.length ? sum(cpuS, (s) => s.rate) : null,
     cpuLimitCores: limit(cpuL && cpuL.filter((s) => s.value > 0)),
     memoryBytes: rssS && rssS.length ? sum(rssS, (s) => s.value) : null,
@@ -78,6 +79,7 @@ export async function loadServiceMetrics(client, name, { seconds, now = () => Da
     memLimit: [MEM_LIMIT, () => gauges(client, MEM_LIMIT, start, end)],
     restarts: [RESTARTS, () => rates(client, RESTARTS, start, end)],
     oom: [OOM, () => rates(client, OOM, start, end)],
+    dns: [DNS_METRIC, () => rates(client, DNS_METRIC, start, end)],
   }
   const keys = Object.keys(reads).filter((k) => present.has(reads[k][0]))
   const [mapResult, ...settled] = await Promise.allSettled([
@@ -104,6 +106,7 @@ export async function loadServiceMetrics(client, name, { seconds, now = () => Da
   if (!traffic && !Object.keys(series).length && warnings.length) throw new Error(warnings[0])
 
   const resources = summarizeResources(id, series, seconds)
-  const found = !!(traffic && (traffic.inbound.length || traffic.outbound.length)) || Object.values(resources).some((v) => v !== null)
-  return { traffic, resources, warnings, found }
+  const dns = series.dns ? summarizeDns(series.dns, id) : null
+  const found = !!(dns) || !!(traffic && (traffic.inbound.length || traffic.outbound.length)) || Object.values(resources).some((v) => v !== null)
+  return { traffic, resources, dns, warnings, found }
 }

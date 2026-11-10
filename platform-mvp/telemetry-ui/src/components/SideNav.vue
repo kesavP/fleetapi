@@ -2,12 +2,15 @@
 import { computed, inject, onBeforeUnmount, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppIcon from './AppIcon.vue'
+import { APP, describeBuild } from '../version'
 
 // The main menu: a sidebar, one entry per page. The project it is connected to is at the bottom, with the way to change it.
 // Takes the session and alert store by injection so a test can hand it fakes.
-const props = defineProps({ session: { type: Object, default: null }, alerts: { type: Object, default: null } })
+const props = defineProps({ session: { type: Object, default: null }, alerts: { type: Object, default: null }, build: { type: Object, default: null } })
 const session = props.session || inject('session')
 const alerts = props.alerts || inject('alerts', null)
+// Which build this is, at the foot of the menu: so what is deployed can be read off the page (the same is served as /version.json).
+const info = describeBuild(props.build || APP)
 
 const ITEMS = [
   { to: '/applications', label: 'Applications', icon: 'apps' },
@@ -16,6 +19,7 @@ const ITEMS = [
   { to: '/logs', label: 'Logs', icon: 'logs' },
   { to: '/profiles', label: 'Profiles', icon: 'profiles' },
   { to: '/alerts', label: 'Alerts', icon: 'alerts', badge: true },
+  { to: '/incidents', label: 'Incidents', icon: 'incidents' },
 ]
 
 // A page beneath a menu entry (an application, a trace) keeps its entry lit. Vue Router's own "active" class only follows nested
@@ -66,7 +70,7 @@ function toggle() {
     </nav>
 
     <div class="foot">
-      <router-link to="/connection" class="item project" :class="{ active: isActive('/connection') }" :aria-current="isActive('/connection') ? 'page' : null" :title="collapsed ? `Project ${project || '(not connected)'}` : null">
+      <router-link to="/configuration/connection" class="item project" :class="{ active: isActive('/configuration') }" :aria-current="isActive('/configuration') ? 'page' : null" :title="collapsed ? `Project ${project || '(not connected)'}` : null">
         <AppIcon name="connection" />
         <span class="label">
           <small>Project</small>
@@ -77,6 +81,10 @@ function toggle() {
         <AppIcon :name="collapsed ? 'expand' : 'collapse'" />
         <span class="label">Collapse</span>
       </button>
+      <p class="version" data-testid="version" :title="info.title">
+        <span>{{ info.name }}</span> <strong>{{ info.version }}</strong>
+        <small v-if="info.detail">{{ info.detail }}</small>
+      </p>
     </div>
   </aside>
 </template>

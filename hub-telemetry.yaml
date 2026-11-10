@@ -1,0 +1,293 @@
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+# The service never calls the Kubernetes API, so it gets no token.
+automountServiceAccountToken: false
+
+
+---
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+# The bucket as a ClickHouse disk, and the storage policy the service puts the big tables on. The keys are not in this file: ClickHouse
+# reads them from the environment (from_env), which the StatefulSet fills from the Secret. The "default" volume keeps its name because
+# a table's storage policy can only be changed to one that still has the volumes and disks the table was created with.
+# GCS does not support S3 batch deletes, hence support_batch_delete=false.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telemetry-clickhouse-storage
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+data:
+  storage.xml: |
+    <clickhouse>
+      <storage_configuration>
+        <disks>
+          <gcs>
+            <type>s3</type>
+            <endpoint>https://storage.googleapis.com/fleetapi-telemetry-cold/telemetry/</endpoint>
+            <access_key_id from_env="GCS_ACCESS_KEY_ID"/>
+            <secret_access_key from_env="GCS_SECRET_ACCESS_KEY"/>
+            <metadata_path>/var/lib/clickhouse/disks/gcs/</metadata_path>
+            <support_batch_delete>false</support_batch_delete>
+          </gcs>
+          <gcs_cache>
+            <type>cache</type>
+            <disk>gcs</disk>
+            <path>/var/lib/clickhouse/disks/gcs_cache/</path>
+            <max_size>1073741824</max_size>
+          </gcs_cache>
+        </disks>
+        <policies>
+          <tiered>
+            <volumes>
+              <default><disk>default</disk></default>
+              <cold><disk>gcs_cache</disk></cold>
+            </volumes>
+          </tiered>
+        </policies>
+      </storage_configuration>
+    </clickhouse>
+
+
+---
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-clickhouse
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+spec:
+  clusterIP: None
+  selector:
+    app: telemetry-clickhouse
+  ports:
+    - name: native
+      port: 9000
+      targetPort: native
+    - name: http
+      port: 8123
+      targetPort: http
+
+
+---
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+# How the spokes' agents reach the service. Inside this cluster the name
+# telemetry-ingest.<namespace>.svc always works. For other clusters set
+# service.type: NodePort on the kind lab (spokes use
+# http://hub-control-plane:<nodePort>), LoadBalancer on a cloud (with the
+# provider's annotation for an internal one). The query API is on the same port,
+# so whoever can reach the ingest endpoint can also try the read endpoints: the
+# keys are the only protection, and the traffic is plain HTTP. Keep it on a
+# private network, and restrict it with loadBalancerSourceRanges where the
+# provider supports that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+  labels:
+    app: telemetry-ingest
+spec:
+  type: ClusterIP
+  selector:
+    app: telemetry-ingest
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+
+
+---
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+  labels:
+    app: telemetry-ingest
+spec:
+  # The service holds batches in memory until they are inserted; scale it out
+  # only after deciding how a restart should treat the rows in flight.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-ingest
+  template:
+    metadata:
+      labels:
+        app: telemetry-ingest
+    spec:
+      serviceAccountName: telemetry-ingest
+      automountServiceAccountToken: false
+      volumes:
+        - name: projects
+          secret:
+            secretName: telemetry-ingest-keys
+            items:
+              - key: projects.json
+                path: projects.json
+        - name: clickhouse-password
+          secret:
+            secretName: telemetry-clickhouse
+      containers:
+        - name: telemetry-ingest
+          image: "us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images/telemetry-ingest:v19"
+          imagePullPolicy: Always
+          args:
+            - --listen=:8080
+            - --grpc-listen=:4317
+            - --projects-file=/etc/telemetry/projects/projects.json
+            - --clickhouse-addr=telemetry-clickhouse.monitoring.svc.cluster.local:9000
+            - --clickhouse-user=telemetry
+            - --clickhouse-password-file=/etc/telemetry/clickhouse/password
+            - --ttl-metrics=336h
+            - --ttl-traces=168h
+            - --ttl-logs=168h
+            - --ttl-profiles=168h
+            - --storage-policy=tiered
+            - --cold-volume=cold
+            - --cold-after=48h
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: otlp-grpc
+              containerPort: 4317
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: projects
+              mountPath: /etc/telemetry/projects
+              readOnly: true
+            - name: clickhouse-password
+              mountPath: /etc/telemetry/clickhouse
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+
+---
+
+# Source: hub-services/templates/telemetry-ingest.yaml
+# One ClickHouse replica: enough for a lab, and the tables are not replicated.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: telemetry-clickhouse
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+spec:
+  serviceName: telemetry-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-clickhouse
+  template:
+    metadata:
+      labels:
+        app: telemetry-clickhouse
+      annotations:
+        # A change to the storage configuration restarts ClickHouse, which reads it only at start.
+        checksum/storage: 57c5b25e25ef6178ebc5811ecf0882f1c58b5289030c6a21e73d28e494b47a8c
+    spec:
+      volumes:
+        - name: storage-config
+          configMap:
+            name: telemetry-clickhouse-storage
+      containers:
+        - name: clickhouse
+          image: "clickhouse/clickhouse-server:24.8"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLICKHOUSE_USER
+              value: telemetry
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-clickhouse
+                  key: password
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+            - name: GCS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-gcs
+                  key: accessKeyId
+            - name: GCS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-gcs
+                  key: secretAccessKey
+          ports:
+            - name: native
+              containerPort: 9000
+            - name: http
+              containerPort: 8123
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: storage-config
+              mountPath: /etc/clickhouse-server/config.d/storage.xml
+              subPath: storage.xml
+              readOnly: true
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+
+

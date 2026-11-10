@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -13,7 +14,7 @@ import (
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/model"
 )
 
-type TTLs struct{ Metrics, Traces, Logs, Profiles time.Duration }
+type TTLs struct{ Metrics, Traces, Logs, Profiles, Databases time.Duration }
 
 type Options struct {
 	Addrs          []string
@@ -23,11 +24,25 @@ type Options struct {
 	TLS            bool
 	CreateDatabase bool
 	TTL            TTLs
+	Tier           Tiering
+}
+
+// Tiering moves the big tables' old data to a slow volume. The zero value is no tiering. The names are spliced into SQL, so the
+// config validates them; Policy and Volume are set up in the ClickHouse server's own configuration.
+type Tiering struct {
+	Policy string        // storage policy for the big tables; "" = leave them on the default disk
+	Volume string        // the policy's slow volume
+	After  time.Duration // data older than this moves; 0 = never
 }
 
 type Store struct {
-	conn driver.Conn
-	ttl  TTLs
+	conn      driver.Conn
+	ttl       TTLs
+	tier      Tiering
+	database  string // for the information page: where the tables are
+	tls       bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func connect(o Options, database string) (driver.Conn, error) {
@@ -66,11 +81,16 @@ func Open(ctx context.Context, o Options) (*Store, error) {
 		_ = conn.Close()
 		return nil, err
 	}
-	return &Store{conn: conn, ttl: o.TTL}, nil
+	return &Store{conn: conn, ttl: o.TTL, tier: o.Tier, database: o.Database, tls: o.TLS}, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.conn.Ping(ctx) }
-func (s *Store) Close() error                   { return s.conn.Close() }
+
+// Close is safe to call more than once: the driver blocks on a second close.
+func (s *Store) Close() error {
+	s.closeOnce.Do(func() { s.closeErr = s.conn.Close() })
+	return s.closeErr
+}
 
 func insert[T any](ctx context.Context, s *Store, query string, rows []T, vals func(T) []any) error {
 	if len(rows) == 0 {

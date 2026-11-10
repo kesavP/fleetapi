@@ -85,3 +85,70 @@ func TestLoadFailsOnBadFirstFile(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestManageKeysAreTheirOwnKind(t *testing.T) {
+	data := `{"projects":[{"name":"us","ingestKeys":["us-ingest-key-0000001"],"readKeys":["us-read-key-00000001"],"manageKeys":["us-manage-key-000001"]},
+ {"name":"eu","manageKeys":["eu-manage-key-000001"]}]}`
+	p := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := r.ManageProject("us-manage-key-000001"); !ok || n != "us" {
+		t.Fatalf("%q %v", n, ok)
+	}
+	// each kind of key opens only its own kind of access
+	if _, ok := r.ReadProject("us-manage-key-000001"); ok {
+		t.Fatal("a manage key was accepted as a read key: reading is the server's decision, not the registry's")
+	}
+	if _, ok := r.IngestProject("us-manage-key-000001"); ok {
+		t.Fatal("a manage key may ingest")
+	}
+	if _, ok := r.ManageProject("us-read-key-00000001"); ok {
+		t.Fatal("a read key may manage: a browser's key could change incidents")
+	}
+	if _, ok := r.ManageProject("us-ingest-key-0000001"); ok {
+		t.Fatal("an ingest key may manage")
+	}
+	if _, ok := r.ManageProject(""); ok {
+		t.Fatal("an empty key was accepted")
+	}
+	if n, ok := r.ManageProject("eu-manage-key-000001"); !ok || n != "eu" {
+		t.Fatalf("a project with only a manage key: %q %v", n, ok)
+	}
+}
+
+func TestManageKeysAreCheckedLikeTheOthers(t *testing.T) {
+	for name, data := range map[string]string{
+		"short":     `{"projects":[{"name":"us","manageKeys":["short"]}]}`,
+		"shared":    `{"projects":[{"name":"us","readKeys":["shared-key-0000000001"],"manageKeys":["shared-key-0000000001"]}]}`,
+		"two teams": `{"projects":[{"name":"us","manageKeys":["shared-key-0000000001"]},{"name":"eu","manageKeys":["shared-key-0000000001"]}]}`,
+	} {
+		if _, err := Parse([]byte(data)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestProjectsListsEveryProjectOnceInOrder(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "p.json")
+	// "eu" has only an ingest key, "ops" only a manage key, "us" all three: each must be listed, once.
+	data := `{"projects":[
+ {"name":"us","ingestKeys":["us-ingest-key-0000001"],"readKeys":["us-read-key-00000001"],"manageKeys":["us-manage-key-000001"]},
+ {"name":"ops","manageKeys":["ops-manage-key-00001"]},
+ {"name":"eu","ingestKeys":["eu-ingest-key-0000001"]}]}`
+	if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.Projects()
+	if strings.Join(got, ",") != "eu,ops,us" {
+		t.Fatalf("projects = %v", got)
+	}
+}

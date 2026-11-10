@@ -8,7 +8,26 @@ const STATEFULSET = /^(\/k8s\/[a-z0-9-]+\/[a-z0-9-]+)-\d+\/.+/
 const CRONJOB = /^(\/k8s-cronjob\/[a-z0-9-]+\/[a-z0-9-]+)\/.+/
 const BARE_POD = /^(\/k8s\/[a-z0-9-]+\/[a-z0-9-]+)\/.+/
 
-/** "/k8s/shop/frontend-5d6f8c7b9-xk2lp/server" -> {id: "/k8s/shop/frontend", ns, name, label}; null for a host process. */
+// Containers the node-agent names for orchestrators this map does not group (a Nomad job, an ECS service, a Swarm service). They are left
+// out rather than mis-grouped as hosts.
+const UNSUPPORTED = /^\/(nomad|ecs|swarm)\//
+
+/**
+ * A process or container on a plain host (a VM, a bare-metal machine, plain Docker): the node-agent's container id is its cgroup path, such as
+ * "/system.slice/nginx.service" or "/docker/postgres", the same on every host that runs it, so those hosts are instances of one application.
+ * That id is also the service name on its traces and logs, so it is kept as the application id. The name is the last part without ".service".
+ */
+function hostWorkload(id) {
+  if (!id.startsWith('/') || id === '/' || UNSUPPORTED.test(id) || /^\/k8s(-cronjob)?\//.test(id)) return null // a Kubernetes id is never a host's
+  const last = id.split('/').filter(Boolean).pop() || ''
+  const name = last.replace(/\.(service|slice)$/, '') || last
+  return name ? { id, ns: 'host', name, label: name, host: true } : null
+}
+
+/**
+ * The application a container id belongs to. "/k8s/shop/frontend-5d6f8c7b9-xk2lp/server" -> {id: "/k8s/shop/frontend", ns, name, label}; a
+ * container on a plain host ("/system.slice/nginx.service") is an application of its own with `host: true`; null for anything else.
+ */
 export function workloadOf(containerId) {
   const id = String(containerId || '')
   for (const re of [DEPLOYMENT, DAEMONSET, STATEFULSET, CRONJOB, BARE_POD]) {
@@ -18,7 +37,16 @@ export function workloadOf(containerId) {
       return { id: m[1], ns, name, label: `${ns}/${name}` }
     }
   }
-  return null
+  return hostWorkload(id)
+}
+
+/** The application an APPLICATION id stands for (as opposed to a container id): the same, for "/k8s/shop/frontend" or "/system.slice/nginx.service". */
+export function workloadForId(applicationId) {
+  const id = String(applicationId || '')
+  const k = workloadOf(`${id}/x`) // a Kubernetes application id has no container part: give it one
+  if (k && !k.host && k.id === id) return k
+  const h = hostWorkload(id)
+  return h && h.id === id ? h : null
 }
 
 /**
@@ -28,6 +56,25 @@ export function workloadOf(containerId) {
 export function podOf(containerId) {
   const m = /^(\/k8s(?:-cronjob)?\/[a-z0-9-]+\/[a-z0-9-]+)\/.+/.exec(String(containerId || ''))
   return m ? m[1] : null
+}
+
+/**
+ * Which instance of its application a series is from: the pod for a Kubernetes container (so a sidecar is not a second instance), the
+ * machine for a container on a plain host (every series the agent sends carries `machine_id`, and the same unit on two machines is two
+ * instances). null for what is neither.
+ */
+export function instanceOf(labels) {
+  const pod = podOf(labels.container_id)
+  if (pod) return pod
+  const w = workloadOf(labels.container_id)
+  return w && w.host ? `${w.id}@${labels.machine_id || 'unknown-machine'}` : null
+}
+
+/** The port of "ip:port" or "[ipv6]:port", as text; '' when there is none. */
+export function portOf(address) {
+  const a = String(address || '').trim()
+  const m = a.startsWith('[') ? /\]:(\d+)$/.exec(a) : (a.match(/:/g) || []).length === 1 ? /:(\d+)$/.exec(a) : null
+  return m ? m[1] : ''
 }
 
 /** The host part of "ip:port", "[ipv6]:port" or "name:port"; a bare address is returned as it is. */

@@ -1,0 +1,18 @@
+<!-- Stands in for the chart's GCS storage policy: the same volume names, with a second local disk as the cold volume. -->
+<clickhouse>
+  <storage_configuration>
+    <disks>
+      <cold_disk>
+        <path>/var/lib/clickhouse-cold/</path>
+      </cold_disk>
+    </disks>
+    <policies>
+      <tiered>
+        <volumes>
+          <default><disk>default</disk></default>
+          <cold><disk>cold_disk</disk></cold>
+        </volumes>
+      </tiered>
+    </policies>
+  </storage_configuration>
+</clickhouse>

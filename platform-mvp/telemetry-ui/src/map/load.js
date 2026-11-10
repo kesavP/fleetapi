@@ -5,6 +5,15 @@ const CONNECTS = 'container_net_tcp_successful_connects_total'
 const FAILED_CONNECTS = 'container_net_tcp_failed_connects_total'
 const HTTP_REQUESTS = 'container_http_requests_total'
 const LISTEN = 'container_net_tcp_listen_info'
+const CONN_TIME = 'container_net_tcp_connection_time_seconds_total'
+const NET_LATENCY = 'container_net_latency_seconds'
+
+// How far back to look for successful connections, to learn what each Service address leads to (see graph.js). A failing Service has no
+// successful connection in the window it has been failing for, so the lookback is longer than the window: four times it, at least an hour,
+// at most a day. One extra read of one counter.
+export const LEARN_MIN_SECONDS = 3600
+export const LEARN_MAX_SECONDS = 24 * 3600
+export const learnWindow = (seconds) => Math.min(Math.max(seconds * 4, LEARN_MIN_SECONDS), LEARN_MAX_SECONDS)
 
 /**
  * Mean per-second rate of each series of `metric` between two epoch times (seconds). The service computes a rate per
@@ -60,7 +69,15 @@ export async function loadMap(client, { seconds, now = () => Date.now(), present
     { name: CONNECTS, run: () => rates(client, CONNECTS, start, end), into: 'conn' },
     { name: FAILED_CONNECTS, run: () => rates(client, FAILED_CONNECTS, start, end), into: 'fail' },
     { name: HTTP_REQUESTS, run: () => rates(client, HTTP_REQUESTS, start, end), into: 'http' },
+    // Timings of the connections, for the edges: the map stands without them, so a failure to read them is a warning and not an error.
+    { name: CONN_TIME, run: () => rates(client, CONN_TIME, start, end), into: 'connTime', optional: true },
+    { name: NET_LATENCY, run: () => gaugeMeans(client, NET_LATENCY, start, end), into: 'rtt', optional: true },
   ].filter((j) => present.has(j.name))
+  // An enhancement, not data the map stands on: if it cannot be read the map is drawn without it and says so.
+  const learnSeconds = learnWindow(seconds)
+  if (present.has(CONNECTS) && learnSeconds > seconds) {
+    jobs.push({ name: `${CONNECTS} (earlier, to learn Service addresses)`, run: () => rates(client, CONNECTS, end - learnSeconds, end), into: 'learn', optional: true })
+  }
   const active = []
   for (const p of L7_PROTOCOLS) {
     if (!present.has(p.calls)) continue
@@ -76,7 +93,7 @@ export async function loadMap(client, { seconds, now = () => Date.now(), present
   const warnings = []
   let incomplete = false // a counter could not be read or was cut short: what is missing may only look absent
   if (!present.has(LISTEN)) warnings.push('The project has no listen-address metric, so no callee can be named: every destination shows as external.')
-  const input = { listen: [], conn: [], fail: [], http: [], protocols: active }
+  const input = { listen: [], conn: [], fail: [], http: [], protocols: active, learn: [], connTime: [], rtt: [] }
   const settled = await Promise.allSettled(jobs.map((j) => j.run()))
   let listeners = null // which workloads listened during the range, and which still do at its end (null: no such metric)
   const failures = [] // why each failed, to name the reason when all do (warnings may start with something unrelated)
@@ -84,21 +101,46 @@ export async function loadMap(client, { seconds, now = () => Date.now(), present
     const j = jobs[i]
     if (r.status !== 'fulfilled') {
       const why = r.reason && r.reason.message ? r.reason.message : 'failed'
-      failures.push(why)
       warnings.push(`${j.name}: ${why}`)
-      incomplete = true
+      if (!j.optional) {
+        failures.push(why)
+        incomplete = true
+      }
       return
     }
-    if (r.value.truncated) incomplete = true
+    if (r.value.truncated) {
+      if (!j.optional) incomplete = true
+      warnings.push(
+        j.optional
+          ? `${j.name} returned more series than one call allows, so ${j.into === 'learn' ? 'some Service addresses may not be learned' : 'some of it is missing'}`
+          : `${j.name} returned more series than one call allows, so the map is partial; use a shorter window`,
+      )
+    }
     if (j.into === 'listen') listeners = workloadsListening(r.value.series, start, end)
-    if (r.value.truncated) warnings.push(`${j.name} returned more series than one call allows, so the map is partial; use a shorter window`)
     if (typeof j.into === 'function') j.into(r.value)
     else input[j.into] = r.value.series
   })
-  if (jobs.length && failures.length === jobs.length) throw new Error(failures[0])
+  const required = jobs.filter((j) => !j.optional).length
+  if (required && failures.length === required) throw new Error(failures[0])
 
   const graph = buildGraph(input)
+  if (graph.learned.ambiguous.length) {
+    const list = graph.learned.ambiguous.map((a) => a.destination).join(', ')
+    warnings.push(`${graph.learned.ambiguous.length} Service address(es) lead to more than one application (${list}); the one with the most traffic was used.`)
+  }
   return { ...graph, warnings, incomplete, listeners, from: start * 1000, to: end * 1000, hasData: present.has(CONNECTS) || present.has(HTTP_REQUESTS) }
+}
+
+/** The mean value of every series of a gauge over the range: [{labels, value}]. A gauge such as a round-trip time is read as it was, not as a rate. */
+export async function gaugeMeans(client, metric, start, end) {
+  const step = Math.max(15, Math.floor((end - start) / 40))
+  const data = (await client.get('metrics/query_range', { name: metric, from: start.toFixed(3), to: end.toFixed(3), step })) || {}
+  const series = []
+  for (const s of data.series || []) {
+    const pts = (s.points || []).filter((p) => Number.isFinite(p.v))
+    if (pts.length) series.push({ labels: s.labels || {}, value: pts.reduce((a, p) => a + p.v, 0) / pts.length })
+  }
+  return { series, truncated: !!data.truncated }
 }
 
 /**

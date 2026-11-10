@@ -1,6 +1,7 @@
 import { gaugeSeries, gauges, loadMap, rates } from '../map/load.js'
-import { podOf, workloadOf } from '../map/workload.js'
+import { instanceOf, workloadForId, workloadOf } from '../map/workload.js'
 import { shape } from '../alerts/report.js'
+import { DNS_METRIC, summarizeDns } from './dns.js'
 import { serviceNames } from './search.js'
 import { CPU, CPU_LIMIT, MEM_LIMIT, OOM, RESTARTS, RSS, trafficFor } from './serviceMetrics.js'
 
@@ -14,10 +15,12 @@ import { CPU, CPU_LIMIT, MEM_LIMIT, OOM, RESTARTS, RSS, trafficFor } from './ser
 
 const APP_TYPE = 'container_application_type'
 
-/** "/k8s/shop/frontend" -> "shop"; a name that is not a Kubernetes workload belongs to "other". */
+/** "/k8s/shop/frontend" -> "shop"; a unit or container on a plain host ("/system.slice/nginx.service") -> "host"; any other name -> "other". */
 export function namespaceOf(id) {
   const m = /^\/k8s(?:-cronjob)?\/([a-z0-9-]+)\//.exec(String(id || ''))
-  return m ? m[1] : 'other'
+  if (m) return m[1]
+  const w = workloadForId(id)
+  return w && w.host ? 'host' : 'other'
 }
 
 // Namespaces that are the platform's, not the user's applications; and the ones that watch them. They are hidden until asked for,
@@ -52,7 +55,7 @@ function typeOf(typeSeries, id, serves) {
  * Applications from what was read. Pure. Every input may be missing (null): the project may lack a metric, or a read may have
  * failed, and an application is then shown with `–` for that, never with a made-up zero.
  */
-export function buildApplications({ inventory = null, cpu = null, cpuLimit = null, memLimit = null, restarts = null, oom = null, appTypes = null, graph = null, errorLogs = null, names = [], seconds = 3600 }) {
+export function buildApplications({ inventory = null, cpu = null, cpuLimit = null, memLimit = null, restarts = null, oom = null, appTypes = null, dns = null, graph = null, errorLogs = null, names = [], seconds = 3600 }) {
   const ids = new Set()
   for (const s of inventory || []) {
     const w = workloadOf(s.labels.container_id)
@@ -71,13 +74,13 @@ export function buildApplications({ inventory = null, cpu = null, cpuLimit = nul
 
   const apps = []
   for (const id of ids) {
-    const w = workloadOf(`${id}/x`)
+    const w = workloadForId(id)
     const name = w ? w.name : id
     const ns = namespaceOf(id)
 
     const mine = inventory ? by(inventory, id) : null
-    const pods = mine ? new Set(mine.map((s) => podOf(s.labels.container_id))) : null
-    const running = mine ? new Set(mine.filter((s) => s.fresh).map((s) => podOf(s.labels.container_id))) : null
+    const pods = mine ? new Set(mine.map((s) => instanceOf(s.labels))) : null
+    const running = mine ? new Set(mine.filter((s) => s.fresh).map((s) => instanceOf(s.labels))) : null
     const fresh = mine ? mine.filter((s) => s.fresh) : null
     const lim = (series) => {
       const v = series ? by(series, id).filter((s) => s.value > 0) : []
@@ -111,6 +114,7 @@ export function buildApplications({ inventory = null, cpu = null, cpuLimit = nul
       oomKills: total(oom),
       traffic: inb && traffic.inbound.length ? { rps: inb.rps, errPct: inb.errPct, callers: traffic.inbound.length } : null,
       upstreams: out.length ? { ok: out.filter((e) => e.errPct < 1).length, total: out.length } : null,
+      dns: dns ? summarizeDns(dns, id) : null,
       errorLines: rows.length,
       uniqueErrors: unique.size,
       hasMetrics: !!(mine && mine.length) || !!(traffic && (traffic.inbound.length || traffic.outbound.length)),
@@ -179,6 +183,7 @@ export async function loadApplications(client, { seconds, now = () => Date.now()
   add('cpu', CPU, () => rates(client, CPU, start, end))
   add('restarts', RESTARTS, () => rates(client, RESTARTS, start, end))
   add('oom', OOM, () => rates(client, OOM, start, end))
+  add('dns', DNS_METRIC, () => rates(client, DNS_METRIC, start, end))
   add('graph', null, () => loadMap(client, { seconds, now, present }))
   add('names', null, () => serviceNames(client, { seconds, now, strict: true }))
   add('errorLogs', null, async () => {
@@ -207,5 +212,51 @@ export async function loadApplications(client, { seconds, now = () => Date.now()
   const graph = got.graph || null
   if (graph) warnings.push(...graph.warnings)
   const apps = buildApplications({ ...got, inventory: got.inventory || null, graph, names: got.names || [], seconds })
-  return { apps, warnings, from: start * 1000, to: end * 1000, hasInventory: !!got.inventory }
+  return { apps, graph, warnings, from: start * 1000, to: end * 1000, hasInventory: !!got.inventory }
+}
+
+/**
+ * The aspects of an application the Map's hover menu lists, each with a status (ok, caution, bad, or unknown when it is not known) and a short
+ * reason: instances, CPU, memory, DNS and logs. Each is also a place on the application's page (its `anchor`).
+ */
+export function healthItems(app) {
+  const ratio = (used, limit) => (used != null && limit ? used / limit : null)
+  const instances = app.instances
+    ? app.instances.running === 0 ? ['bad', `none of ${app.instances.seen} running`] : app.instances.running < app.instances.seen ? ['caution', `${app.instances.running} of ${app.instances.seen} running`] : ['ok', `${app.instances.running} running`]
+    : ['unknown', 'not reported']
+  const cpu = ratio(app.cpuCores, app.cpuLimit)
+  const mem = ratio(app.memoryBytes, app.memoryLimit)
+  const cpuItem = cpu == null ? (app.cpuCores != null ? ['ok', 'no limit set'] : ['unknown', 'not reported']) : cpu >= 1 ? ['bad', 'at its limit'] : cpu >= 0.8 ? ['caution', `${Math.round(cpu * 100)}% of its limit`] : ['ok', `${Math.round(cpu * 100)}% of its limit`]
+  const memItem = app.oomKills > 0 ? ['bad', `${app.oomKills} out-of-memory kill${app.oomKills === 1 ? '' : 's'}`]
+    : mem == null ? (app.memoryBytes != null ? ['ok', 'no limit set'] : ['unknown', 'not reported'])
+    : mem >= 0.95 ? ['bad', `${Math.round(mem * 100)}% of its limit`] : mem >= 0.8 ? ['caution', `${Math.round(mem * 100)}% of its limit`] : ['ok', `${Math.round(mem * 100)}% of its limit`]
+  const dnsItem = !app.dns ? ['unknown', 'no lookups']
+    : app.dns.failedShare >= 0.05 ? ['bad', `${Math.round(app.dns.failedShare * 1000) / 10}% of lookups fail`]
+    : app.dns.failedShare >= 0.01 ? ['caution', `${Math.round(app.dns.failedShare * 1000) / 10}% of lookups fail`] : ['ok', 'lookups succeed']
+  const logsItem = app.uniqueErrors > 0 ? ['caution', `${app.uniqueErrors} unique error${app.uniqueErrors === 1 ? '' : 's'}`] : ['ok', 'no errors']
+  const item = (key, label, [status, hint]) => ({ key, label, status, hint, anchor: key })
+  return [item('instances', 'Instances', instances), item('cpu', 'CPU', cpuItem), item('memory', 'Memory', memItem), item('dns', 'DNS', dnsItem), item('logs', 'Logs', logsItem)]
+}
+
+/**
+ * A short-lived cache of the applications, shared by the pages that need them (the Applications page, and the Map's hover menu), so moving
+ * between them does not read about 25 metrics each time. Keyed by project and window; a load in progress is shared, not repeated; a failed
+ * one is forgotten so the next call tries again. `force` skips it (a Refresh).
+ */
+export function createApplicationsCache({ ttlMs = 30_000, now = () => Date.now() } = {}) {
+  const entries = new Map()
+  return {
+    get(client, { project, seconds, force = false, load = loadApplications }) {
+      const key = `${project}|${seconds}`
+      const hit = entries.get(key)
+      if (!force && hit && now() - hit.at < ttlMs) return hit.promise
+      const promise = load(client, { seconds })
+      entries.set(key, { at: now(), promise })
+      promise.catch(() => {
+        if (entries.get(key) && entries.get(key).promise === promise) entries.delete(key)
+      })
+      return promise
+    },
+    clear: () => entries.clear(),
+  }
 }

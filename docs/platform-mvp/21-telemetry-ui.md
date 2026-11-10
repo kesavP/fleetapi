@@ -72,7 +72,7 @@ kubectl -n monitoring port-forward svc/telemetry-ui 8081:80
 
 ## Verified
 
-- `make test-ui`: lint clean, 467 unit tests, production build (about 95 kB JS, 37 kB gzip).
+- `make test-ui`: lint clean, 869 unit tests, production build (about 95 kB JS, 37 kB gzip).
 - `make test-ui-chart`: renders nothing when disabled; Service type and node-port validation; pod runs as uid 101 with a
   read-only root, no ServiceAccount token, no capabilities; no Secret; proxy target defaults and overrides.
 - `make test-ui-image`: against a stub API, `X-API-Key` and the path arrive unchanged; POST gets 405; `/v1/*` and other
@@ -219,6 +219,68 @@ real evaluator and handler against a stub read API and a stub Alertmanager over 
 `make test-telemetry-alerts-image` (the real image, read-only and non-root, through firing, auth, metrics, Alertmanager, a restart and
 resolution). `make test-ui-image` also checks the nginx routing of the alerts path.
 
+## The Service map page
+
+The map is laid out to be read, after the reference page:
+
+- **Header and filters** match the Applications page: the time range at the top right; a search, the **namespaces** drop-down (several at
+  once) and the **application / control-plane / monitoring** checkboxes. Only application namespaces are drawn at first. The picture shows the
+  applications of the namespaces and kinds chosen, the external endpoints they call, and the calls among those. Search dims what does not
+  match (and says how many match) without moving anything. A namespace chosen earlier whose kind is then switched off stops filtering, as the
+  picker shows "all" for it (the Applications page had the same fault and is fixed too).
+- **Cards, not boxes.** Each application is a card: a status dot, its name, `type / ns:<namespace>` below it (`redis / ns:shop`,
+  `ns:shop`), and an icon for what it is (workload, database, queue, external endpoint, which is a dashed card with a hollow dot). The dot
+  is green, amber or red from a firing alert or from the share of calls it answers that fail (1% and 5%); it is calls and alerts only, since
+  the map has no instance or restart data (the Applications page has those).
+- **Thin straight lines** from caller to callee with a small arrowhead, green when healthy, amber or red when not (arrowheads keep one size
+  whatever the line's width). Nothing is written on a healthy line: a failing one carries its rate and error share, and selecting an
+  application labels its lines, in the gap before the target where no card is. Hover a line for its numbers. A call back to an earlier layer
+  arcs, so it does not run along the forward ones.
+- **Left to right or top to bottom**, with the toggle at the right of the filters. Layers are the longest path through the calls, as in the
+  reference's "flow" mode; an application with no calls stays, on its own.
+- **Fits the page.** The picture is scaled down to the width it has (never up, and never below 65%, where text would stop being readable;
+  past that it scrolls), with zoom in, zoom out and fit buttons. Selecting an application does not change its size: its details (calls in
+  and out, with rates, error shares and its status) open below it, with a link to its page; double-click opens it. The full list of calls is
+  below, collapsed, as a table.
+- The choices (search, namespaces, kinds, direction, time range) are kept in the address, so a view can be shared.
+
+## Plain hosts (VMs, bare metal, Docker)
+
+The map and the Applications page now cover machines that are not Kubernetes nodes, matched the way Coroot's server does it:
+
+- **An application per unit or container.** The node-agent names a process by its cgroup path, such as `/system.slice/nginx.service` or
+  `/docker/postgres`, the same on every machine that runs it. That path is the application id (and the service name on its traces and logs), the
+  name drops the `.service`, and the namespace shows as `host`. The same unit on two machines is **one application with two instances**: every
+  series carries `machine_id`, and instances are counted per machine (per pod for Kubernetes). Nomad, ECS and Swarm ids are left out, not
+  mis-grouped.
+- **Address and port, not the IP.** One host IP carries many services, so an address is matched on its exact `ip:port`, from the listen-address
+  metric. An IP alone is trusted only for a Kubernetes pod, where an IP is one pod's. A call to a port nothing listens on shows as external, never
+  as whichever service happens to listen on another port of that machine. Two applications claiming the same `ip:port` at the same moment is
+  ambiguous and resolves to nothing; a pod IP reused later goes to the latest.
+- **Loopback on a host is a call.** A process dialling `127.0.0.1:5432` is talking to whatever listens there on **the same machine**
+  (`machine_id` plus port), and on no other. Inside a pod loopback still stays in the pod and is not drawn.
+- The Service-address learning (above) works on hosts too, for a virtual IP in front of a service.
+
+Not covered: Nomad, ECS and Swarm; a host process with no listen-address metric cannot be found as a callee; a loopback listener is found only
+when the caller's series carries `machine_id` (every series from the node-agent does).
+
+## Hover menu, categories and DNS on the Map
+
+- **Hover a card** for a menu of how that application is doing: **Instances** (running of seen), **CPU** and **Memory** against their limits (an
+  out-of-memory kill is bad whatever the usage), **DNS** (share of lookups that fail) and **Logs** (unique errors), each with a coloured dot and a
+  short reason. Each entry is a link to that part of the application's page (`/applications/<id>#memory`), which scrolls there once it has its data.
+  The data is the Applications page's, read with the map and shared through a 30-second cache, so moving between the two pages does not reread it.
+  If it cannot be read the map is still drawn and the menu says "not loaded".
+- **⋮ on a card** opens **Move the app to a category**: *+ a new category*, then every other category. A category is where you put applications to
+  show or hide them with the checkboxes (application, control-plane, monitoring, and any you make; the **+** next to the checkboxes makes one too).
+  Moving an application into a category that is not shown takes it off the picture, so the page says so and offers **Show it** and **Undo**.
+- **Where categories are kept: in this browser** (localStorage, per project). They are your own way of organising what you look at, so they are
+  not shared with other people or other browsers. The store (`src/categories.js`) is a small interface, so keeping them somewhere shared later does
+  not touch the pages. Names are lowercase letters, digits, spaces and dashes, up to 32 characters, up to 12 of your own.
+- **DNS** is a section on the application page: lookups a second, the share that fail (SERVFAIL, refused, malformed), and the names with the most
+  failures. NXDOMAIN is counted apart and is **not** a failure: with search domains every short name misses once, so a healthy application has many.
+  (The agent also exports `ip_to_fqdn`, which could name external endpoints; not used yet.)
+
 ## Service map: how it works
 
 `/map` is built in the browser from the metrics the API serves, with no Kubernetes API and no extra backend:
@@ -237,9 +299,78 @@ resolution). `make test-ui-image` also checks the nginx routing of the alerts pa
    them, with p95 from the client's histogram (none for ClickHouse, whose client-side figure was wrong by two orders of
    magnitude). Loopback calls stay inside a pod and are left out.
 
+**Service addresses (learned).** An app dials a Service's cluster IP and the kernel translates it to a pod; the node-agent recovers the pod
+from the conntrack table and reports both addresses (`destination`, `actual_destination`). A connection that *fails* has no pod to look up,
+so the agent reports only the address that was dialled, and without more help the map would draw a refused connection to a Service as an
+external endpoint, which is exactly when the callee matters most. So the map learns the table itself, with no Kubernetes data: every
+successful connection pairs a dialled address with a reached pod whose application is known, which is one vote for "this address leads to
+that application". Failed connects are then drawn against the application behind the address (and count against it in the error share and
+in the alerts).
+
+- Only the exact `ip:port` is learned (a Service's other ports may lead elsewhere), and an address a connection actually reached is never
+  overridden by what was learned.
+- An address that leads to more than one application (overlapping selectors) goes to the one with the most traffic, ties by name, and the
+  page warns that it chose.
+- The learning reads successful connects once more over a longer lookback (four windows, at least an hour, at most a day), so a Service that
+  has been failing for the whole window is still recognised by what it did before. If that read fails the map is drawn without it, with a
+  warning, and is not marked incomplete.
+- A Service that never had a successful connection in the lookback (down since before it, or brand new) still shows as external.
+- When it was used, the Map page says so ("matched from the successful connections to it earlier").
+
 Limits: no HTTP latency yet; one project is one cluster (no cross-cluster view); a service the agent cannot see
 listening, or called only through an external address, shows as external; if a call counter returns more series than one
 call allows, the page says the map is partial and suggests a shorter window.
+
+## Configuration: the Project entry and the ClickHouse tab
+
+The **Project** entry at the foot of the menu opens **Configuration**, which has a tab strip: **Connection** (`/configuration/connection`; the old `/connection` address redirects there) and **ClickHouse** (`/configuration/clickhouse`).
+
+The ClickHouse tab follows Coroot's ClickHouse settings page, but is **read-only**: the protocol (Native), database and TLS are shown disabled, and the address and credentials read `<hidden>`. There is no "Test & Save" because the connection is set when the telemetry service is deployed, and a browser with a read key must not be able to change it. Instead the tab shows a status line (version, answer time) and a **Test connection** button, which asks the service again.
+
+Below it, **Storage Usage** lists, for each kind of data, this project's size (an estimate from its share of the table's rows), rows, compression ratio, TTL and how long ago its oldest data is. **Cluster Topology** lists the server's disks with free and total space and a usage bar (green, amber from 75%, red from 90%). Both the platform-wide columns and the disks need `telemetryIngest.exposeClusterInfo=true`; without it the tab says the operator has not shared them. The endpoint is described in [20-telemetry-ingest.md](20-telemetry-ingest.md#clickhouse-information).
+
+The other tabs of Coroot's Configuration page (Prometheus, AI, cloud integrations, applications, notifications, organization) are not built.
+
+Needs a telemetry-ingest image that has the `clickhouse` endpoint: an older one makes the tab say it did not answer with ClickHouse information.
+
+## Incidents: finding them and saying why
+
+**Incidents** (menu, `/incidents`) lists the times an application used its error budget up too fast, and each opens an analysis (`/incidents/<id>`) laid out like Coroot's incident page: a headline naming the cause, when it started and ended, the objectives with compliance and burn rates, then the root cause, a graph of the affected applications, the request path, what changed, error logs, CPU hot spots and, on the Traces tab, the failed and slowest requests. Everything is computed in the browser from the read API; nothing new is stored or deployed beyond the UI image (and a telemetry-ingest that serves the metrics it already did).
+
+**Detection** (`src/incidents/inbound.js`, `detect.js`). Two objectives per application, from the node-agent's inbound HTTP metrics: 99.9% of requests should not fail (5xx and gRPC server failures) and 99.9% should be served in under 500 ms (the histogram bound at or above the threshold; if the agent has no such bound the next one is used and the page says so). The burn rate is the bad share over the budget (0.1%). An incident is a stretch where a 5-minute and a 1-hour window both burn at 14.4x or more (the usual multi-window rule), at least 2 minutes long, joining breaches closer than 5 minutes; its start and end are the first and last minute that burned that fast. A window with fewer than 20 requests is never judged: a quiet service is not an incident. Applications with no inbound HTTP metrics have no objective and so no incidents.
+
+**Analysis** (`analyze.js`). The incident's window is compared with the hour (at least) before it, leaving out the two minutes the trouble was starting. For the hurt application and everything it calls, however far down, it looks for: request errors and p95 against the baseline; CPU at its limit (or, with no limit, several times the cores); restarts and out-of-memory kills that began in the incident; error log lines per second; and for each call, its error share, p95, connection time and network round trip. Round trip and connection time are new on the service map's edges (`rttMs`, `connMs`; the round trip is per callee IP, so only for pods). The cause is picked by how directly it points: (1) a call whose round trip or connection time rose, (2) a resource problem in an application none of whose own calls got slower, (3) the deepest call that got slower or started failing, shown as only "possible". Trouble travels up the call chain, so among causes the one furthest from the hurt application wins. When nothing qualifies it says there is no cause among the dependencies and lists what was compared; it does not guess. Thresholds are in `ANALYSIS_DEFAULTS` and `SLO_DEFAULTS` and can be passed in.
+
+**The words** (`narrative.js`) come from fixed sentence shapes over the findings, so every name and number in the text is in the findings and the text is the same every time. The findings object (`analyze()`'s result: issues with before and during values, the affected nodes and calls, the root cause with its path and confidence, what was checked) is the contract: a language model can be added later by giving it that object plus the evidence and asking for a remediation section, with the templated text as the fallback when it is off or fails. Nothing about the analysis depends on one.
+
+**Rules you can change.** *Configuration → Incidents* sets the objectives (availability, latency, what "fast enough" means), objectives of single applications that differ, when it is an incident (burn rate, the two windows, fewest requests, shortest incident), what size of change counts in the analysis, and which checks run at all (a check turned off is not listed and cannot be the cause). They are kept **in this browser, per project** (`localStorage`, `src/incidents/settings.js`), the same as the application categories: someone else, or the same person in another browser, sees the defaults. The read key cannot write to the service, and sharing needs a write endpoint and a decision on who may change it; the store's interface (get, set, reset) is small so that can replace the browser later. Values are typed in percent, minutes and milliseconds, validated against ranges, and cleaned on the way in from storage (a value that is not a number in its range goes back to the default), so a stale or hand-edited entry cannot make the pages misjudge. A change applies the next time the Incidents pages load; an incident that no longer breaches the new rules disappears from the list.
+
+**Not covered.** Events that are not in the telemetry (a chaos experiment, a deploy, a config change) cannot be named as a trigger: the node-agent does not send Kubernetes events. The latency threshold (what is "fast enough") is one value for all applications, because the agent's histogram is read at one bound; only the objectives (percent) can differ per application. Rules of your own (a new metric, filter and threshold) are not supported. The alert service does not open incidents: this is a page, not a notifier. A cause is a likely explanation from correlated changes, not a proof.
+
+## "The node-agent is not set up" notice
+
+The UI cannot look into a cluster, but it can look at what the hub stored, and an empty project is almost always the node-agent not being set up. Applications, Map, Traces, Logs and Profiles show an **error at the top** when the project has no telemetry from it (`src/components/TelemetryNotice.vue`, `src/api/telemetry.js`):
+
+| State | Seen as | Says |
+|---|---|---|
+| `none` | the project has no metrics at all | no telemetry has arrived: the node-agent is probably not installed, or cannot reach the hub |
+| `other` | metrics exist, none named `container_…` (the node-agent's) | metrics arrive from something else; the node-agent is missing |
+| `stale` | the node-agent's newest metric has no point in the last 10 minutes | the agents have stopped or lost their connection to the hub |
+
+Each carries the three things to check in the cluster that should be reporting: is the DaemonSet installed (`kubectl -n telemetry-agent get daemonset node-agent`, and where to turn it on in the spoke chart), is it running on every node (`get pods -o wide`, and the usual reasons: image tag, Pod Security, taints), and can it reach the hub with the right key (`logs ds/node-agent`, how to read a 401 against a refusal or timeout and why `collectorURL` must not be `localhost` or a `ClusterIP`). A **Check again** button re-asks, and the check repeats when the connected project changes.
+
+It never guesses: a check that cannot be made (the read fails, or only the freshness probe fails) shows nothing rather than telling someone to fix what is not broken, and the page reports a failed read itself. It needs the injected client and session, so a page mounted without them (the page tests) is unaffected. The demo API can show it: `NO_AGENT=1` (no metrics) or `NO_AGENT=other`.
+
+## Which version is deployed
+
+The foot of the sidebar says which build is running: the name and version, then the commit and the day it was built (hover for the whole of it). It is hidden when the menu is collapsed. The same facts are served as `GET /version.json` (never cached), so what is deployed can be read with curl or a browser, without cluster access:
+
+```sh
+curl -s http://<ui address>/version.json
+# {"name": "telemetry-ui", "version": "v20", "commit": "7ce1cf979ce8-dirty", "built": "2026-11-10T09:30:06Z"}
+```
+
+They are fixed at **build time** (`vite.config.js` defines them from `APP_VERSION`, `APP_COMMIT` and `APP_BUILT`; `src/buildInfo.js` checks them), so they describe what was built, not what is configured where it runs. `make build-telemetry-ui-image` fills them: the version is `IMAGE_TAG`, the commit is `git rev-parse --short=12 HEAD` with `-dirty` added when the working tree has uncommitted changes (and none outside a git checkout), and the time is now (UTC); any can be set on the command line (`UI_COMMIT=...`, `UI_BUILT=...`). A build without them (`npm run build`, or `docker build` with no arguments) says `dev`. A value that is not the shape of a version, commit or time is shown as `unknown` or left out, never put in the page. The version is the image tag, so tag each build differently (v20, v21, …): `dev` or `latest` would make the footer say that and nothing more.
 
 ## Next
 

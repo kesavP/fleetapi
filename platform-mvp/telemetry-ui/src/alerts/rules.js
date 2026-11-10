@@ -13,6 +13,8 @@
 // Absence is the hard part: "no traffic" is also what a failed read looks like. A rule that depends on something being absent
 // is skipped when either look was incomplete (a counter failed or was cut short), and nothing here treats a missing read as zero.
 
+import { workloadForId } from '../map/workload.js'
+
 export const DEFAULTS = {
   recentSeconds: 300, //          the window being judged
   baselineSeconds: 3600, //       what "normal" is, ending where the recent window starts
@@ -47,7 +49,8 @@ export const RULES = {
 const sum = (xs, f) => xs.reduce((a, x) => a + f(x), 0)
 const activity = (e) => (e.rps ?? 0) + e.connPerSec
 const round = (n, d = 3) => Math.round(n * 10 ** d) / 10 ** d
-const labelOf = (id) => (id.startsWith('/k8s/') ? id.split('/').slice(2).join('/') : id)
+// "shop/cartservice" for a Kubernetes workload, "nginx" for a unit on a plain host, the id itself for anything else
+const labelOf = (id) => (id.startsWith('/k8s/') ? id.split('/').slice(2).join('/') : (workloadForId(id) || { label: id }).label)
 
 function inboundOf(result, id) {
   const edges = result.edges.filter((e) => e.to === id)

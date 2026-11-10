@@ -1,5 +1,6 @@
 <script setup>
 import { computed, inject, onMounted, reactive, ref } from 'vue'
+import TelemetryNotice from '../components/TelemetryNotice.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { WINDOWS } from '../api/services'
 import { STACK_LIMITS, buildTree, formatValue, frameHue, layoutRows, loadStacks, loadTargets, meanCores, nodeAt, parseType, topFunctions } from '../api/profiles'
@@ -103,6 +104,7 @@ const label = (n) => `${n.name} — ${formatValue(n.value, unit.value)} (${share
 <template>
   <div class="page-head"><h1>Profiles</h1></div>
   <section class="panel">
+    <TelemetryNotice />
     <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p class="help">Where a service spends its CPU or memory, from the node-agents' continuous profiles. Wider means more.</p>

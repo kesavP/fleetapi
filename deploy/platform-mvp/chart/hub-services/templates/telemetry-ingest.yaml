@@ -3,6 +3,13 @@
 {{- $ti := .Values.telemetryIngest }}
 {{- $keys := lookup "v1" "Secret" $ns "telemetry-ingest-keys" }}
 {{- $svc := $ti.service }}
+{{- $cold := $ti.clickhouse.coldStorage }}
+{{- if $cold.enabled }}
+{{- if not $cold.bucket }}{{ fail "telemetryIngest.clickhouse.coldStorage.bucket is required when coldStorage.enabled" }}{{ end }}
+{{- if not $cold.existingSecret }}{{ fail "telemetryIngest.clickhouse.coldStorage.existingSecret is required when coldStorage.enabled (a Secret with accessKeyId and secretAccessKey)" }}{{ end }}
+{{- if regexMatch "[^a-z0-9._-]" $cold.bucket }}{{ fail (printf "telemetryIngest.clickhouse.coldStorage.bucket %q is not a bucket name" $cold.bucket) }}{{ end }}
+{{- if regexMatch "[<>&\"'\\s]" $cold.path }}{{ fail "telemetryIngest.clickhouse.coldStorage.path must not contain quotes, angle brackets, & or spaces" }}{{ end }}
+{{- end }}
 {{- if not (has $svc.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
 {{- fail (printf "telemetryIngest.service.type %q must be ClusterIP, NodePort or LoadBalancer" $svc.type) }}
 {{- end }}
@@ -20,8 +27,10 @@
 # spokes, keeps it in ClickHouse and serves it per project (one project per
 # fleet cluster). See docs/platform-mvp/20-telemetry-ingest.md.
 #
-# Keys. Each fleet cluster gets an ingest key (its agents send with it) and a
-# read key (the query API). They are generated once and kept on upgrades
+# Keys. Each fleet cluster gets an ingest key (its agents send with it), a
+# read key (the query API) and a manage key (changing incidents: the read key
+# can look, never touch, so a browser can hold it; the manage key stays on the
+# hub and is never copied to a spoke). They are generated once and kept on upgrades
 # (`lookup` finds the existing Secret); under `helm template` there is no
 # cluster, so throwaway values are rendered. projects.json is derived from the
 # same keys, so the two can never disagree.
@@ -38,13 +47,16 @@ stringData:
   {{- range .Values.fleet.clusters }}
   {{- $ingest := randAlphaNum 32 }}
   {{- $read := randAlphaNum 32 }}
+  {{- $manage := randAlphaNum 32 }}
   {{- if and $keys $keys.data }}
   {{- $ingest = index $keys.data (printf "%s.ingest" .name) | default (b64enc $ingest) | b64dec }}
   {{- $read = index $keys.data (printf "%s.read" .name) | default (b64enc $read) | b64dec }}
+  {{- $manage = index $keys.data (printf "%s.manage" .name) | default (b64enc $manage) | b64dec }}
   {{- end }}
   {{ .name }}.ingest: {{ $ingest | quote }}
   {{ .name }}.read: {{ $read | quote }}
-  {{- $projects = append $projects (dict "name" .name "ingestKeys" (list $ingest) "readKeys" (list $read)) }}
+  {{ .name }}.manage: {{ $manage | quote }}
+  {{- $projects = append $projects (dict "name" .name "ingestKeys" (list $ingest) "readKeys" (list $read) "manageKeys" (list $manage)) }}
   {{- end }}
   projects.json: {{ dict "projects" $projects | toJson | quote }}
 ---
@@ -81,6 +93,50 @@ spec:
       port: 8123
       targetPort: http
 ---
+{{- if $cold.enabled }}
+# The bucket as a ClickHouse disk, and the storage policy the service puts the big tables on. The keys are not in this file: ClickHouse
+# reads them from the environment (from_env), which the StatefulSet fills from the Secret. The "default" volume keeps its name because
+# a table's storage policy can only be changed to one that still has the volumes and disks the table was created with.
+# GCS does not support S3 batch deletes, hence support_batch_delete=false.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telemetry-clickhouse-storage
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-clickhouse
+data:
+  storage.xml: |
+    <clickhouse>
+      <storage_configuration>
+        <disks>
+          <gcs>
+            <type>s3</type>
+            <endpoint>{{ trimSuffix "/" $cold.endpoint }}/{{ $cold.bucket }}/{{ trimAll "/" $cold.path }}/</endpoint>
+            <access_key_id from_env="GCS_ACCESS_KEY_ID"/>
+            <secret_access_key from_env="GCS_SECRET_ACCESS_KEY"/>
+            <metadata_path>/var/lib/clickhouse/disks/gcs/</metadata_path>
+            <support_batch_delete>false</support_batch_delete>
+          </gcs>
+          <gcs_cache>
+            <type>cache</type>
+            <disk>gcs</disk>
+            <path>/var/lib/clickhouse/disks/gcs_cache/</path>
+            <max_size>{{ int64 $cold.cacheBytes }}</max_size>
+          </gcs_cache>
+        </disks>
+        <policies>
+          <tiered>
+            <volumes>
+              <default><disk>default</disk></default>
+              <cold><disk>gcs_cache</disk></cold>
+            </volumes>
+          </tiered>
+        </policies>
+      </storage_configuration>
+    </clickhouse>
+---
+{{- end }}
 # One ClickHouse replica: enough for a lab, and the tables are not replicated.
 apiVersion: apps/v1
 kind: StatefulSet
@@ -99,7 +155,18 @@ spec:
     metadata:
       labels:
         app: telemetry-clickhouse
+      {{- if $cold.enabled }}
+      annotations:
+        # A change to the storage configuration restarts ClickHouse, which reads it only at start.
+        checksum/storage: {{ toYaml $cold | sha256sum }}
+      {{- end }}
     spec:
+      {{- if $cold.enabled }}
+      volumes:
+        - name: storage-config
+          configMap:
+            name: telemetry-clickhouse-storage
+      {{- end }}
       containers:
         - name: clickhouse
           image: "{{ $ti.clickhouse.image.repository }}:{{ $ti.clickhouse.image.tag }}"
@@ -114,6 +181,18 @@ spec:
                   key: password
             - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
               value: "1"
+            {{- if $cold.enabled }}
+            - name: GCS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cold.existingSecret }}
+                  key: accessKeyId
+            - name: GCS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cold.existingSecret }}
+                  key: secretAccessKey
+            {{- end }}
           ports:
             - name: native
               containerPort: 9000
@@ -133,6 +212,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/clickhouse
+            {{- if $cold.enabled }}
+            - name: storage-config
+              mountPath: /etc/clickhouse-server/config.d/storage.xml
+              subPath: storage.xml
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml $ti.clickhouse.resources | nindent 12 }}
   volumeClaimTemplates:
@@ -240,6 +325,23 @@ spec:
             - --ttl-traces={{ $ti.retention.traces }}
             - --ttl-logs={{ $ti.retention.logs }}
             - --ttl-profiles={{ $ti.retention.profiles }}
+{{- if $cold.enabled }}
+            - --storage-policy=tiered
+            - --cold-volume=cold
+            - --cold-after={{ $cold.coldAfter }}
+{{- end }}
+{{- if $ti.exposeClusterInfo }}
+            - --expose-cluster-info
+{{- end }}
+{{- if $ti.detection.enabled }}
+            - --detect-interval={{ $ti.detection.interval }}
+            - --detect-lookback={{ $ti.detection.lookback }}
+            - --detect-max-age={{ $ti.detection.maxAge }}
+            - --detect-availability={{ $ti.detection.availability }}
+            - --detect-latency={{ $ti.detection.latency }}
+            - --detect-latency-seconds={{ $ti.detection.latencySeconds }}
+            - --detect-burn={{ $ti.detection.burn }}
+{{- end }}
           ports:
             - name: http
               containerPort: 8080

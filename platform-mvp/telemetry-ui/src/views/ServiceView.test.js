@@ -175,4 +175,69 @@ describe('ServiceView', () => {
       expect(w.text()).toContain('No call or resource metrics')
     })
   })
+
+  describe('DNS and the places the Map links to', () => {
+    const SVC = '/k8s/shop/cartservice'
+    const POD = '/k8s/shop/cartservice-7c9d8f6b5d-bk7q2/server'
+    const flat = (n) => Array.from({ length: 40 }, (_, i) => ({ t: NOW - (40 - i) * 15000, v: n }))
+    const last = (v) => [{ t: NOW - 1000, v }]
+    const DNSDATA = {
+      container_resources_memory_rss_bytes: [{ labels: { container_id: POD }, points: last(64 * 1024 * 1024) }],
+      container_dns_requests_total: [
+        { labels: { container_id: POD, domain: 'redis.shop.svc', status: 'ok', request_type: 'TypeA' }, points: flat(4) },
+        { labels: { container_id: POD, domain: 'redis.shop.svc', status: 'servfail', request_type: 'TypeA' }, points: flat(1) },
+        { labels: { container_id: POD, domain: 'x.shop.svc.cluster.local', status: 'nxdomain', request_type: 'TypeA' }, points: flat(3) },
+      ],
+    }
+    const dnsClient = (data = DNSDATA) => ({
+      get: vi.fn(async (path, params) => {
+        if (path === 'metrics') return Object.keys(data)
+        if (path === 'metrics/query_range') return { series: data[params.name] || [] }
+        return answers[path]
+      }),
+    })
+
+    it('shows the DNS lookups: how many, how many fail, and for which names', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: dnsClient() })
+      const sec = w.get('#dns')
+      expect(sec.get('[data-testid=dns-summary]').text()).toContain('8.00 lookups a second')
+      expect(sec.get('[data-testid=dns-summary]').text()).toContain('12.5% fail')
+      const rows = sec.findAll('tbody tr').map((r) => r.findAll('td').map((c) => c.text()))
+      expect(rows[0]).toEqual(['redis.shop.svc', '5.00', '1.00', '–']) // the name with failures first
+      expect(rows[1]).toEqual(['x.shop.svc.cluster.local', '3.00', '–', '3.00']) // NXDOMAIN is not a failure
+    })
+
+    it('says so when there are no lookups, and for a name that is not a workload', async () => {
+      const none = await mountAt(encodeURIComponent(SVC), { client: dnsClient({ container_resources_memory_rss_bytes: DNSDATA.container_resources_memory_rss_bytes }) })
+      expect(none.w.get('#dns').text()).toContain('No DNS lookups recorded')
+      const plain = await mountAt('plainname', { client: dnsClient() })
+      expect(plain.w.get('#dns').text()).toContain('kept for Kubernetes workloads')
+    })
+
+    it('has a place for each aspect the Map\'s menu links to', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: dnsClient() })
+      for (const id of ['instances', 'cpu', 'memory', 'dns', 'logs']) expect(w.find(`#${id}`).exists(), id).toBe(true)
+    })
+
+    it('scrolls to the part named in the address, once the data is there', async () => {
+      const scrolled = []
+      const original = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function () { scrolled.push(this.id) }
+      try {
+        const router = (await mountAt(encodeURIComponent(SVC) + '#memory', { client: dnsClient() })).router
+        await flushPromises()
+        expect(scrolled).toContain('memory')
+        await router.push({ path: router.currentRoute.value.path, hash: '#dns' })
+        await flushPromises()
+        expect(scrolled).toContain('dns')
+      } finally {
+        Element.prototype.scrollIntoView = original
+      }
+    })
+
+    it('does not fail when there is nothing to scroll to', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC) + '#nonsense', { client: dnsClient() })
+      expect(w.find('#dns').exists()).toBe(true)
+    })
+  })
 })

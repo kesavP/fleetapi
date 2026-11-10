@@ -18,7 +18,8 @@ trap cleanup EXIT
 if [ -z "$image" ]; then
   image="telemetry-ui:test-$$"
   echo "== building $image"
-  docker build -q -t "$image" "$root/platform-mvp/telemetry-ui" >/dev/null
+  # built as the Makefile builds it, with a version the checks below look for
+  docker build -q -t "$image" --build-arg APP_VERSION=v-imgtest --build-arg APP_COMMIT=abcdef123456-dirty --build-arg APP_BUILT=2026-11-10T07:30:00Z "$root/platform-mvp/telemetry-ui" >/dev/null
 fi
 
 work="$(mktemp -d)"; trap 'cleanup; rm -rf "$work"' EXIT
@@ -41,6 +42,10 @@ echo "indexhdr=$(curl -sI $U/ | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(content
 echo "alerts=$(curl -s -H 'X-API-Key: k2' "$U/api/v1/projects/gke/alerts")"
 echo "lookalikes=$(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/gke/alerts/extra" | sed 's/.*"who": "\([a-z]*\)".*/\1/') $(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/gke/alertsx" | sed 's/.*"who": "\([a-z]*\)".*/\1/') $(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/alerts/metrics" | sed 's/.*"who": "\([a-z]*\)".*/\1/')"
 echo "alertspost=$(code -X POST $U/api/v1/projects/gke/alerts)"
+echo "version=$(curl -s $U/version.json | tr -d ' \n')"
+echo "versionhdr=$(curl -sI $U/version.json | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(content-type|cache-control):' | cut -d: -f1 | sort | tr '\n' ,)"
+js="$(curl -s $U/ | grep -o '/assets/index-[^"]*\.js' | head -1)"
+echo "bundle=$(curl -s $U$js | grep -c 'v-imgtest')"
 echo "apihdr=$(curl -sI -H 'X-API-Key: k' $U/api/v1/projects/gke/metrics | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(cache-control|x-content-type-options):' | cut -d: -f1 | sort | tr '\n' ,)"
 SH
 
@@ -71,6 +76,10 @@ has 'apihdr=cache-control,x-content-type-options,'
 has 'alerts={"who": "alerts", "path": "/api/v1/projects/gke/alerts", "key": "k2"}'
 has 'lookalikes=ingest ingest ingest'
 has 'alertspost=405'
+# the build says which build it is, in a file that can be fetched without a browser, and in the page itself
+has 'version={"name":"telemetry-ui","version":"v-imgtest","commit":"abcdef123456-dirty","built":"2026-11-10T07:30:00Z"}'
+has 'versionhdr=cache-control,content-type,'
+has 'bundle=1'
 
 echo "== the alerts path answers 502 when the alert service is not there (the page then checks for itself)"
 docker rm -f "$net-alerts" >/dev/null

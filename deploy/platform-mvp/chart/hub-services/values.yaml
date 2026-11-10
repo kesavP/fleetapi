@@ -121,6 +121,21 @@ telemetryIngest:
     traces: 168h
     logs: 168h
     profiles: 168h
+  # Let the UI's ClickHouse page show the whole platform's table sizes and the server's disks. Off: a project sees only its own rows and size.
+  exposeClusterInfo: false
+  # Open incidents without anyone looking at a page. Every `interval`, each project's inbound request metrics are judged against an
+  # availability and a latency objective, and an incident is opened (once) for an application that burns its error budget `burn` times
+  # faster than allowed over both a 5-minute and a 1-hour window. The incident page's own detector is the same algorithm. It only ever OPENS
+  # incidents: resolving them is up to whoever is on call. One replica only (the service already is); see docs/platform-mvp/20-telemetry-ingest.md.
+  detection:
+    enabled: false
+    interval: 1m
+    lookback: 3h # at least 1h05m
+    maxAge: 30m # trouble that ended longer ago than this when first seen is history, not opened
+    availability: 0.999 # share of requests that should not fail
+    latency: 0.999 # share of requests that should be faster than latencySeconds
+    latencySeconds: 0.5
+    burn: 14.4 # 14.4 = a 30-day budget gone in two days
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -155,6 +170,24 @@ telemetryIngest:
     resources:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { cpu: "1", memory: 2Gi }
+    # Tiered storage: recent data stays on the volume above, older data moves to a Google Cloud Storage bucket and is still queried
+    # through the same tables. Only the four big tables (metrics, traces, logs, profile samples) move. The bucket is reached through
+    # its S3-compatible API with an HMAC key, which you create and put in a Secret yourself:
+    #   gsutil hmac create <service-account>
+    #   kubectl -n monitoring create secret generic telemetry-gcs \
+    #     --from-literal=accessKeyId=<access id> --from-literal=secretAccessKey=<secret>
+    # The service account needs roles/storage.objectAdmin on the bucket. Data moves a whole part at a time, when the part's newest
+    # row is older than coldAfter, so expect up to about a day more than that. coldAfter must be shorter than every retention above;
+    # the service refuses to start otherwise. Switching this off later does not bring moved data back; it stays in the bucket.
+    coldStorage:
+      enabled: true
+      bucket: "fleetapi-telemetry-cold"
+      path: telemetry
+      endpoint: https://storage.googleapis.com
+      existingSecret: "telemetry-gcs"
+      coldAfter: 48h
+      # Local cache of bucket reads, in bytes, kept on the volume above.
+      cacheBytes: 1073741824
 
 # The telemetry UI (platform-mvp/telemetry-ui): a static app plus a proxy of the
 # read API, in nginx. Build and push the image first

@@ -26,6 +26,14 @@ type Reader interface {
 	SearchLogs(ctx context.Context, q LogQuery) ([]model.LogRecord, error)
 	ListProfiles(ctx context.Context, project string) ([]ProfileService, error)
 	TopStacks(ctx context.Context, q ProfileQuery) ([]StackValue, error)
+	// ClickHouseInfo: how the service is connected and how much this project stores. `share` adds whole-table sizes and the server's disks.
+	ClickHouseInfo(ctx context.Context, project string, share bool) (ClickHouseInfo, error)
+	// What the database collectors report (see dbtelemetry): the targets, their statement statistics, their sessions, their slow statements.
+	ListDatabases(ctx context.Context, project string) ([]DBTarget, error)
+	TopStatements(ctx context.Context, q StatementQuery) (StatementsResult, error)
+	ActivitySeries(ctx context.Context, project, target string, from, to time.Time, step int) (ActivityResult, error)
+	SlowQueries(ctx context.Context, f SlowQueryFilter) ([]SlowQueryRow, error)
+	PoolSeries(ctx context.Context, project, target string, from, to time.Time, step int) (PoolsResult, error)
 }
 
 type SeriesInfo struct {

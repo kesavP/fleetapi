@@ -11,7 +11,7 @@ The menu is a sidebar; each entry is its own page. The project you are connected
 - **Application** (`/applications/<name>`): span counts, errors and latency percentiles by span kind, a timeline, recent errors,
   spans and logs, and profile types, plus traffic in and out and CPU, memory and restarts from the metrics. Span figures
   cover the newest 1000 spans; the page says when that is less than the window.
-- **Map** (`/map`): who calls whom, drawn from the agents' connection, HTTP/gRPC and database counters; selecting a service
+- **Map** (`/map`): a readable map (cards with status, type and namespace; thin health-coloured lines; namespace and kind filters; left-to-right or top-to-bottom; fits the page) of who calls whom (Kubernetes and plain hosts: matched on address and port; hover a card for instances, CPU, memory, DNS and logs; ⋮ moves it to a category), drawn from the agents' connection, HTTP/gRPC and database counters (connections that fail are matched to the application behind the Service address they dialled, learned from earlier successful ones); selecting a service
   lists its calls and links to its page. See `docs/platform-mvp/21-telemetry-ui.md` for how services are recognised.
 - **Traces** (`/traces`, `/traces/<id>`) and **Logs** (`/logs`): filterable searches, a waterfall for one trace; filters live in
   the address so a search can be shared.
@@ -74,7 +74,7 @@ the `telemetry-ingest` Service. nginx resolves it per request, so the pod starts
 
 | Command | Covers |
 | --- | --- |
-| `make test-ui` | 467 Vitest tests (API client, session store, connection form, services list, service page, map logic and view, traces, trace, logs, profiles, alert rules, state, store, report; the alert service's config, auth, evaluator, notifications and an end-to-end run), lint, build |
+| `make test-ui` | 869 Vitest tests (API client, ClickHouse tab, incident detection and analysis, session store, connection form, services list, service page, map logic and view, traces, trace, logs, profiles, alert rules, state, store, report; the alert service's config, auth, evaluator, notifications and an end-to-end run), lint, build |
 | `make test-ui-chart` | chart rendering: off by default, service types, locked-down pod, no Secret |
 | `make test-ui-image` | the real image in front of a stub API: proxying, GET-only, blocked paths, the alerts path's routing, headers, read-only root, starts without its API |
 | `make test-telemetry-alerts-chart` | the alert service's chart template: locked-down pod, only `projects.json` mounted, settings, persistence |

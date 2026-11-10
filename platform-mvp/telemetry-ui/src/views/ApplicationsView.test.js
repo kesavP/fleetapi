@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import { reactive } from 'vue'
 import ApplicationsView from './ApplicationsView.vue'
+import { createCategoryStore } from '../categories'
 
 const stub = { template: '<i/>' }
 const session = (v = { project: 'gke', key: 'k' }) => ({ get: () => v })
@@ -91,6 +92,14 @@ describe('ApplicationsView', () => {
     expect(w.get('[data-testid=count]').text()).toBe('2 of 5 applications')
   })
 
+  it('forgets a namespace choice when its kind is switched off, as the picker does, instead of showing an empty table', async () => {
+    const { w } = await mountAt('?cat=application,monitoring&ns=monitoring')
+    expect(names(w)).toEqual(['prometheus']) // only the chosen namespace
+    await w.findAll('.cat input')[2].setValue(false) // monitoring off: that namespace is no longer offered
+    expect(w.get('.ns-all').text()).toBe('all (3)') // the picker says "all"
+    expect(new Set(names(w))).toEqual(new Set(['frontend', 'cartservice', 'ledger'])) // and so does the table
+  })
+
   it('shows the namespace under a name only when the rows span several', async () => {
     const { w } = await mountAt()
     expect(w.findAll('tbody .ns').length).toBe(3)
@@ -174,7 +183,7 @@ describe('ApplicationsView', () => {
     const { w, router } = await mountAt('?ns=shop&status=ok&q=front&cat=application,monitoring&window=900&rows=25', { client })
     expect(names(w)).toEqual(['frontend'])
     expect(w.get('.search-box input').element.value).toBe('front')
-    expect(router.currentRoute.value.query).toEqual({ window: '900', q: 'front', ns: 'shop', cat: 'application,monitoring', status: 'ok', rows: '25' })
+    await vi.waitFor(() => expect(router.currentRoute.value.query).toEqual({ window: '900', q: 'front', ns: 'shop', cat: 'application,monitoring', status: 'ok', rows: '25' }))
     const q = client.get.mock.calls.find(([p]) => p === 'metrics/query_range')[1]
     expect(Number(q.to) - Number(q.from)).toBeCloseTo(900, 0)
   })
@@ -232,5 +241,75 @@ describe('ApplicationsView', () => {
     const off = await mountAt('', { client, session: session(null) })
     expect(client.get).not.toHaveBeenCalled()
     expect(off.w.text()).toContain('Not connected')
+  })
+
+  describe('categories the user chose', () => {
+    const FRONT = '/k8s/shop/frontend'
+    const memory = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) } }
+    const storeWith = (setup) => { const c = createCategoryStore({ session: session(), storage: memory() }); setup(c); return c }
+
+    it('shows an application where the user moved it, not where its namespace put it', async () => {
+      const categories = storeWith((c) => c.move(FRONT, 'monitoring', 'application'))
+      const { w } = await mountAt('', { categories })
+      expect(names(w)).not.toContain('frontend') // moved out of "application"
+      await w.findAll('.cat input')[2].setValue(true) // monitoring
+      expect(names(w)).toContain('frontend')
+      expect(names(w)).toContain('prometheus')
+    })
+
+    it('shows an application moved INTO application, though its namespace is a platform one', async () => {
+      const categories = storeWith((c) => c.move('/k8s/monitoring/prometheus', 'application', 'monitoring'))
+      const { w } = await mountAt('', { categories })
+      expect(names(w)).toContain('prometheus')
+    })
+
+    it('offers a checkbox for a category of the user\'s own, and the apps moved to it', async () => {
+      const categories = storeWith((c) => { c.add('payments tier'); c.move('/k8s/payments/ledger', 'payments tier', 'application') })
+      const { w } = await mountAt('', { categories })
+      expect(w.findAll('.cat').map((l) => l.text())).toEqual(['application', 'control-plane', 'monitoring', 'payments tier'])
+      expect(names(w)).not.toContain('ledger')
+      await w.findAll('.cat input')[3].setValue(true)
+      expect(names(w)).toContain('ledger')
+    })
+
+    it('makes a category from the "+", shows it at once, and keeps it in the address', async () => {
+      const categories = storeWith(() => {})
+      const { w, router } = await mountAt('', { categories })
+      await w.get('.cat-plus').trigger('click')
+      await w.get('.cat-form input').setValue('Team A')
+      await w.get('.cat-form').trigger('submit')
+      await flushPromises()
+      expect(categories.all()).toContain('team a')
+      expect(w.findAll('.cat input').map((b) => b.element.checked)).toEqual([true, false, false, true]) // ticked: it is shown, not hidden
+      await vi.waitFor(() => expect(router.currentRoute.value.query.cat).toBe('application,team a'))
+    })
+
+    it('starts from a category in the address when it exists, and ignores one that does not', async () => {
+      const categories = storeWith((c) => c.add('team a'))
+      const known = await mountAt('?cat=team%20a', { categories })
+      expect(known.w.findAll('.cat input').map((b) => b.element.checked)).toEqual([false, false, false, true])
+      const unknown = await mountAt('?cat=ghost', { categories })
+      expect(unknown.w.findAll('.cat input')[0].element.checked).toBe(true)
+    })
+  })
+
+  describe('the shared cache', () => {
+    it('reads through the cache it was given, and Refresh forces a new read', async () => {
+      const get = vi.fn(async (client, o) => (await import('../api/applications')).loadApplications(client, { seconds: o.seconds }))
+      const { w } = await mountAt('', { appCache: { get } })
+      expect(get).toHaveBeenCalledTimes(1)
+      expect(get.mock.calls[0][1]).toMatchObject({ project: 'gke', seconds: 3600, force: false })
+      expect(names(w).length).toBe(3)
+      await w.get('.head-right button').trigger('click')
+      await flushPromises()
+      expect(get.mock.calls[1][1].force).toBe(true)
+    })
+    it('does not force a new read for a change of time range, which is a different key', async () => {
+      const get = vi.fn(async () => ({ apps: [], warnings: [], hasInventory: true }))
+      const { w } = await mountAt('', { appCache: { get } })
+      await w.get('#window').setValue(String(900))
+      await flushPromises()
+      expect(get.mock.calls.at(-1)[1]).toMatchObject({ seconds: 900, force: false })
+    })
   })
 })

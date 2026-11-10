@@ -148,6 +148,18 @@ describe('incomplete reads', () => {
   })
 })
 
+describe('applications on a plain host', () => {
+  const NGINX = '/system.slice/nginx.service'
+  it('names an alert after the unit, not its whole cgroup path', () => {
+    const recent = look([edge(B, C, { rps: 5 })], { listeners: listening([NGINX, B, C]) })
+    const baseline = look([edge(B, NGINX, { rps: 10 }), edge(B, C, { rps: 5 })], { listeners: listening([NGINX, B, C]) })
+    const a = evaluate({ recent, baseline }).alerts.find((x) => x.service === NGINX)
+    expect(a).toMatchObject({ rule: 'no-traffic', label: 'nginx' })
+    expect(a.summary).toContain('nginx stopped receiving traffic')
+    expect(a.summary).not.toContain('/system.slice')
+  })
+})
+
 describe('config', () => {
   it('takes thresholds from the caller', () => {
     const recent = look([edge(B, A, { rps: 10, callErrors: 1 }), edge(B, C, { rps: 5 })], { listeners: listening([A, B, C]) })

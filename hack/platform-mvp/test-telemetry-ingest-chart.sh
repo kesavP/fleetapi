@@ -96,9 +96,9 @@ python3 - "$work/gke.yaml" <<'PY'
 import sys, yaml, json
 secret = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "Secret" and d["metadata"]["name"] == "telemetry-ingest-keys")
 data = secret["stringData"]
-assert sorted(k for k in data if k != "projects.json") == ["gke.ingest", "gke.read"], sorted(data)
+assert sorted(k for k in data if k != "projects.json") == ["gke.ingest", "gke.manage", "gke.read"], sorted(data)
 assert [p["name"] for p in json.loads(data["projects.json"])["projects"]] == ["gke"]
-print("ok: only gke.ingest and gke.read, and one project")
+print("ok: only gke.ingest, gke.read and gke.manage, and one project")
 PY
 
 echo "== the projects file matches the generated keys"
@@ -111,7 +111,66 @@ projects = json.loads(data["projects.json"])["projects"]
 assert [p["name"] for p in projects] == ["us", "eu"], projects
 for p in projects:
     assert data[p["name"] + ".ingest"] == p["ingestKeys"][0] and data[p["name"] + ".read"] == p["readKeys"][0]
-    assert len(p["ingestKeys"][0]) >= 16 and p["ingestKeys"][0] != p["readKeys"][0]
+    assert data[p["name"] + ".manage"] == p["manageKeys"][0], "the projects file and the Secret disagree about the manage key"
+    keys = [p["ingestKeys"][0], p["readKeys"][0], p["manageKeys"][0]]
+    assert all(len(k) >= 16 for k in keys) and len(set(keys)) == 3, "the three kinds of key must differ (a key is valid for one kind of access)"
 print("ok: one ingest and one read key per fleet cluster, matching the projects file")
 PY
+echo "== cluster details are shared only when asked for"
+render --set telemetryIngest.enabled=true | grep -q -- "--expose-cluster-info" && fail "--expose-cluster-info rendered by default"
+render --set telemetryIngest.enabled=true --set telemetryIngest.exposeClusterInfo=true | grep -q -- "--expose-cluster-info" || fail "--expose-cluster-info missing when exposeClusterInfo=true"
+
+echo "== incident detection: off by default, and its settings reach the service when on"
+render --set telemetryIngest.enabled=true | grep -q -- "--detect-" && fail "a --detect- flag rendered by default"
+det="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.interval=30s --set telemetryIngest.detection.burn=6 --set telemetryIngest.detection.availability=0.99)"
+for want in "--detect-interval=30s" "--detect-burn=6" "--detect-availability=0.99" "--detect-lookback=3h" "--detect-latency=0.999" "--detect-latency-seconds=0.5" "--detect-max-age=30m"; do
+  grep -q -- "$want" <<<"$det" || fail "$want missing with detection on"
+done
+echo "ok: no detection flags by default; interval, burn, objectives and lookback pass through when enabled"
+
+echo "== tiered storage: off by default, and a bucket plus a Secret when on"
+off="$(render --set telemetryIngest.enabled=true)"
+for needle in "storage-policy" "cold-after" "GCS_ACCESS_KEY_ID" "telemetry-clickhouse-storage" "storage.googleapis.com"; do
+  grep -q -- "$needle" <<<"$off" && fail "'$needle' rendered with tiered storage off"
+done
+cold=(--set telemetryIngest.enabled=true --set telemetryIngest.clickhouse.coldStorage.enabled=true)
+for missing in "bucket" "secret"; do
+  case "$missing" in
+    bucket) args=("${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs) ;;
+    secret) args=("${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=b) ;;
+  esac
+  out="$(render "${args[@]}" 2>&1 || true)"
+  grep -q "required when coldStorage.enabled" <<<"$out" || fail "a missing $missing was not refused: $out"
+done
+out="$(render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket='b</endpoint><x>' --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs 2>&1 || true)"
+grep -q "is not a bucket name" <<<"$out" || fail "a bucket name that breaks out of the XML was accepted: $out"
+out="$(render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=b --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs --set 'telemetryIngest.clickhouse.coldStorage.path=a"b' 2>&1 || true)"
+grep -q "path must not contain" <<<"$out" || fail "a path with a quote was accepted: $out"
+render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=my-bkt --set telemetryIngest.clickhouse.coldStorage.existingSecret=my-gcs --set telemetryIngest.clickhouse.coldStorage.path=/tele/ --set telemetryIngest.clickhouse.coldStorage.coldAfter=72h > "$work/cold.yaml"
+python3 - "$work/cold.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "telemetry-clickhouse-storage")
+xml = cm["data"]["storage.xml"]
+assert "<endpoint>https://storage.googleapis.com/my-bkt/tele/</endpoint>" in xml, xml
+assert 'from_env="GCS_ACCESS_KEY_ID"' in xml and 'from_env="GCS_SECRET_ACCESS_KEY"' in xml
+assert "<support_batch_delete>false</support_batch_delete>" in xml  # GCS has no batch delete
+assert "<default><disk>default</disk></default>" in xml  # the volume an existing table's policy must keep
+sts = next(d for d in docs if d["kind"] == "StatefulSet")
+pod = sts["spec"]["template"]
+c = pod["spec"]["containers"][0]
+env = {e["name"]: e for e in c["env"]}
+for name, key in (("GCS_ACCESS_KEY_ID", "accessKeyId"), ("GCS_SECRET_ACCESS_KEY", "secretAccessKey")):
+    ref = env[name]["valueFrom"]["secretKeyRef"]
+    assert ref == {"name": "my-gcs", "key": key}, ref
+assert "checksum/storage" in pod["metadata"]["annotations"], "ClickHouse would not restart on a configuration change"
+mount = next(m for m in c["volumeMounts"] if m["name"] == "storage-config")
+assert mount["mountPath"] == "/etc/clickhouse-server/config.d/storage.xml" and mount["subPath"] == "storage.xml"
+dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "telemetry-ingest")
+args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
+for a in ("--storage-policy=tiered", "--cold-volume=cold", "--cold-after=72h"):
+    assert a in args, (a, args)
+print("ok: bucket disk, storage policy, keys from the Secret, restart on change, service flags")
+PY
+
 echo "PASS"

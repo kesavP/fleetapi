@@ -1,16 +1,20 @@
-// A layered left-to-right layout: callers on the left, what they call to the right. Pure, so it can be tested.
+// A layered layout: callers first, what they call after them, left to right or top to bottom. Pure, so it can be tested.
 //
 // Layers come from the longest path through the calls, with the edges that close a cycle left out of the ranking (a service
 // that calls back is common; it is still drawn, it just does not push anything a layer further). Within a layer, nodes are
 // ordered by the average position of their neighbours, a few sweeps each way, so edges cross less.
 
-export const NODE_W = 170
-export const NODE_H = 44
-const COL_GAP = 150
-const ROW_GAP = 22
+export const NODE_W = 200
+export const NODE_H = 54
+// Space between one layer and the next ("layer"), and between neighbours inside a layer ("within"). Left to right needs room for
+// the lines between columns; top to bottom stacks wide cards, so it needs less between layers and more between neighbours.
+const GAP = { lr: { layer: 140, within: 22 }, tb: { layer: 64, within: 26 } }
 const PAD = 24
 
-export function layout(nodes, edges) {
+export const DIRECTIONS = ['lr', 'tb']
+
+export function layout(nodes, edges, { direction = 'lr' } = {}) {
+  const dir = direction === 'tb' ? 'tb' : 'lr'
   const ids = nodes.map((n) => n.id)
   const known = new Set(ids)
   const live = edges.filter((e) => known.has(e.from) && known.has(e.to) && e.from !== e.to)
@@ -79,23 +83,64 @@ export function layout(nodes, edges) {
     sweep(columns.slice(0, -1).reverse())
   }
 
+  // `along` is the way layers run (x when left to right), `across` the way a layer's nodes are stacked.
+  const along = dir === 'lr' ? NODE_W : NODE_H
+  const across = dir === 'lr' ? NODE_H : NODE_W
+  const gap = GAP[dir]
   const tallest = Math.max(1, ...columns.map((c) => c.length))
-  const innerH = tallest * NODE_H + (tallest - 1) * ROW_GAP
+  const innerAcross = tallest * across + (tallest - 1) * gap.within
   const pos = new Map()
-  columns.forEach((c, x) => {
-    const h = c.length * NODE_H + (c.length - 1) * ROW_GAP
-    c.forEach((id, i) => pos.set(id, { x: PAD + x * (NODE_W + COL_GAP), y: PAD + (innerH - h) / 2 + i * (NODE_H + ROW_GAP) }))
+  columns.forEach((c, layerIndex) => {
+    const extent = c.length * across + (c.length - 1) * gap.within
+    c.forEach((id, i) => {
+      const a = PAD + layerIndex * (along + gap.layer) // along the layers
+      const b = PAD + (innerAcross - extent) / 2 + i * (across + gap.within) // across them, centred
+      pos.set(id, dir === 'lr' ? { x: a, y: b } : { x: b, y: a })
+    })
   })
+  const alongSize = PAD * 2 + (depth + 1) * along + depth * gap.layer
+  const acrossSize = PAD * 2 + innerAcross
   return {
     positions: pos,
     back,
-    width: PAD * 2 + (depth + 1) * NODE_W + depth * COL_GAP,
-    height: PAD * 2 + innerH,
+    direction: dir,
+    width: dir === 'lr' ? alongSize : acrossSize,
+    height: dir === 'lr' ? acrossSize : alongSize,
   }
 }
 
-/** An SVG path from the right side of one node to the left side of another; a call back to an earlier column arcs around. */
-export function edgePath(a, b, isBack) {
+// Where a straight line's label goes: this far before the end (the target's edge), which is in the gap between the last two layers, clear
+// of the nodes, however long the line. Never before the line's middle, so a short line is labelled at its middle.
+const LABEL_BEFORE_END = 78
+
+function pointOnLine(x1, y1, x2, y2, span) {
+  const length = Math.abs(span)
+  const t = length === 0 ? 0.5 : Math.min(0.95, Math.max(0.5, 1 - LABEL_BEFORE_END / length))
+  return { mx: x1 + (x2 - x1) * t, my: y1 + (y2 - y1) * t }
+}
+
+/**
+ * An SVG path from one node to another: from the right side to the left (left to right) or the bottom to the top (top to bottom).
+ * A call that goes forward is a straight line, which stays readable when many cross; a call back to an earlier layer arcs around so
+ * it does not run along the forward ones. `mx`, `my` is a point on the line for a label.
+ */
+export function edgePath(a, b, isBack, direction = 'lr') {
+  if (direction === 'tb') {
+    const x1 = a.x + NODE_W / 2
+    const y1 = a.y + NODE_H
+    const x2 = b.x + NODE_W / 2
+    const y2 = b.y
+    if (isBack || y2 <= y1) {
+      // out of the top of the caller and into the bottom of the callee, bulging to the side
+      const bulge = 70 + Math.abs(x2 - x1) * 0.1
+      const sx = a.x + NODE_W / 2
+      const sy = a.y
+      const ex = b.x + NODE_W / 2
+      const ey = b.y + NODE_H
+      return { d: `M ${sx} ${sy} C ${sx + bulge} ${sy - 40}, ${ex + bulge} ${ey + 40}, ${ex} ${ey}`, mx: Math.max(sx, ex) + bulge * 0.75, my: (sy + ey) / 2 }
+    }
+    return { d: `M ${x1} ${y1} L ${x2} ${y2}`, ...pointOnLine(x1, y1, x2, y2, y2 - y1) }
+  }
   const x1 = a.x + NODE_W
   const y1 = a.y + NODE_H / 2
   const x2 = b.x
@@ -104,6 +149,5 @@ export function edgePath(a, b, isBack) {
     const lift = 40 + Math.abs(y2 - y1) * 0.1
     return { d: `M ${x1} ${y1} C ${x1 + 60} ${y1 - lift}, ${x2 - 60} ${y2 - lift}, ${x2} ${y2}`, mx: (x1 + x2) / 2, my: Math.min(y1, y2) - lift * 0.75 }
   }
-  const dx = Math.max(40, (x2 - x1) / 2)
-  return { d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 }
+  return { d: `M ${x1} ${y1} L ${x2} ${y2}`, ...pointOnLine(x1, y1, x2, y2, x2 - x1) }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { gaugeSeries, gauges, listenAddresses, loadMap, rates } from './load'
+import { LEARN_MAX_SECONDS, LEARN_MIN_SECONDS, gaugeSeries, gauges, learnWindow, listenAddresses, loadMap, rates } from './load'
 
 const START = 1_700_000_040 // a multiple of 15 s, so a 600 s range is exactly 40 buckets of 15 s
 const END = START + 600
@@ -80,11 +80,11 @@ describe('loadMap', () => {
     expect(r.to).toBe(END * 1000)
   })
 
-  it('queries only the counters in the metric list', async () => {
+  it('queries only the counters in the metric list (the connects counter twice: once for the window, once to learn Service addresses)', async () => {
     const client = clientOf()
     await loadMap(client, { seconds: 600, now: NOW })
     const asked = client.get.mock.calls.filter(([p]) => p === 'metrics/query_range').map(([, q]) => q.name).sort()
-    expect(asked).toEqual(Object.keys(DATA).sort())
+    expect(asked).toEqual([...Object.keys(DATA), 'container_net_tcp_successful_connects_total'].sort())
   })
 
   it('adds a protocol only when the project reports it, and its histogram only if present', async () => {
@@ -159,5 +159,114 @@ describe('gaugeSeries / gauges', () => {
     expect(r.series.map((s) => s.labels.container_id)).toEqual(['live'])
     expect(r.series[0]).not.toHaveProperty('fresh')
     expect(r.series[0].last).toBe((NOW_END - 5) * 1000)
+  })
+})
+
+describe('learning Service addresses', () => {
+  const FE = '/k8s/shop/frontend-5d6f8c7b9-xk2lp/server'
+  const CART = '/k8s/shop/cartservice-7c9d8f6b5d-bk7q2/server'
+  const SVC = '10.0.0.9:7070'
+  const ok = { container_id: FE, destination: SVC, actual_destination: '10.4.1.9:7070' }
+  const failing = { container_id: FE, destination: SVC }
+  const flat = (n) => pts(...Array(40).fill(n))
+  const names = ['container_net_tcp_listen_info', 'container_net_tcp_successful_connects_total', 'container_net_tcp_failed_connects_total']
+  const listenSeries = { labels: { container_id: CART, listen_addr: '10.4.1.9:7070' }, points: pts(1) }
+  const NOW = () => END * 1000
+
+  // The connects counter answers differently for the window and for the longer lookback: this is an outage that has lasted the whole
+  // window, so the window holds only failures, and the earlier look is where the Service was still working.
+  function clientOf({ earlier = [{ labels: ok, points: flat(1) }], inWindow = [], failSeries = [{ labels: failing, points: flat(3) }], failEarlier = '', metrics = names } = {}) {
+    const calls = []
+    return {
+      calls,
+      get: vi.fn(async (path, params) => {
+        if (path === 'metrics') return metrics
+        calls.push(params)
+        const long = Number(params.to) - Number(params.from) > 1000
+        if (params.name === 'container_net_tcp_listen_info') return { series: [listenSeries] }
+        if (params.name === 'container_net_tcp_failed_connects_total') return { series: failSeries }
+        if (params.name === 'container_net_tcp_successful_connects_total') {
+          if (long && failEarlier) throw new Error(failEarlier)
+          return { series: long ? earlier : inWindow }
+        }
+        return { series: [] }
+      }),
+    }
+  }
+
+  it('reads successful connects over a longer lookback, ending where the window ends', async () => {
+    const c = clientOf()
+    await loadMap(c, { seconds: 600, now: NOW })
+    const connects = c.calls.filter((q) => q.name === 'container_net_tcp_successful_connects_total')
+    expect(connects).toHaveLength(2)
+    const long = connects.find((q) => Number(q.to) - Number(q.from) > 1000)
+    expect(Number(long.to)).toBe(END)
+    expect(Number(long.to) - Number(long.from)).toBe(LEARN_MIN_SECONDS)
+  })
+
+  it('names a Service that failed the whole window, from what it did before', async () => {
+    const r = await loadMap(clientOf(), { seconds: 600, now: NOW })
+    expect(r.nodes.some((n) => n.external)).toBe(false)
+    expect(r.edges).toHaveLength(1)
+    expect(r.edges[0]).toMatchObject({ from: '/k8s/shop/frontend', to: '/k8s/shop/cartservice', failedConnects: 3, errPct: 100 })
+    expect(r.learned).toMatchObject({ services: 1, used: 1 })
+    expect(r.warnings).toEqual([])
+  })
+
+  it('draws the failing Service as external when there is nothing to learn from, as before', async () => {
+    const r = await loadMap(clientOf({ earlier: [] }), { seconds: 600, now: NOW })
+    expect(r.edges[0].to).toBe(`external:${SVC}`)
+  })
+
+  it('sizes the lookback: four windows, at least an hour, at most a day, and none when the window is already that long', async () => {
+    expect(learnWindow(60)).toBe(LEARN_MIN_SECONDS)
+    expect(learnWindow(900)).toBe(LEARN_MIN_SECONDS)
+    expect(learnWindow(3600)).toBe(4 * 3600)
+    expect(learnWindow(20000)).toBe(80000)
+    expect(learnWindow(24 * 3600)).toBe(LEARN_MAX_SECONDS)
+    const day = clientOf()
+    await loadMap(day, { seconds: 24 * 3600, now: NOW })
+    expect(day.calls.filter((q) => q.name === 'container_net_tcp_successful_connects_total')).toHaveLength(1) // nothing longer to look at
+  })
+
+  it('does not read the lookback when the project has no connects counter', async () => {
+    const c = clientOf({ metrics: ['container_net_tcp_listen_info', 'container_net_tcp_failed_connects_total'] })
+    await loadMap(c, { seconds: 600, now: NOW })
+    expect(c.calls.some((q) => q.name === 'container_net_tcp_successful_connects_total')).toBe(false)
+  })
+
+  it('draws the map without it, with a warning, when the lookback cannot be read, and does not call the map incomplete', async () => {
+    const r = await loadMap(clientOf({ failEarlier: 'timed out' }), { seconds: 600, now: NOW })
+    expect(r.warnings).toEqual(['container_net_tcp_successful_connects_total (earlier, to learn Service addresses): timed out'])
+    expect(r.incomplete).toBe(false) // a rule that depends on absence may still judge: only a naming improvement is missing
+    expect(r.edges[0].to).toBe(`external:${SVC}`)
+  })
+
+  it('still fails with the real reason when every required read fails, even if the lookback worked', async () => {
+    const c = {
+      get: async (path, params) => {
+        if (path === 'metrics') return names
+        if (Number(params.to) - Number(params.from) > 1000) return { series: [] }
+        throw new Error('This key cannot read project "x".')
+      },
+    }
+    await expect(loadMap(c, { seconds: 600, now: NOW })).rejects.toThrow('cannot read project')
+  })
+
+  it('says when a Service address leads to more than one application and one was chosen', async () => {
+    const CHECKOUT = '/k8s/shop/checkout-6c5d8f7b9d-zq9wn/server'
+    const both = [{ labels: ok, points: flat(1) }, { labels: { ...ok, actual_destination: '10.4.3.3:7070' }, points: flat(9) }]
+    const c = clientOf({ earlier: both })
+    const get = c.get
+    c.get = async (path, params) => {
+      const out = await get(path, params)
+      if (params && params.name === 'container_net_tcp_listen_info') return { series: [listenSeries, { labels: { container_id: CHECKOUT, listen_addr: '10.4.3.3:7070' }, points: pts(1) }] }
+      return out
+    }
+    const r = await loadMap(c, { seconds: 600, now: NOW })
+    expect(r.edges[0].to).toBe('/k8s/shop/checkout') // the one with more traffic
+    expect(r.warnings).toHaveLength(1)
+    expect(r.warnings[0]).toContain('lead to more than one application')
+    expect(r.warnings[0]).toContain(SVC)
   })
 })

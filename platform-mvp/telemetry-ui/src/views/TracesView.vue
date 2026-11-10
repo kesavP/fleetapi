@@ -1,5 +1,6 @@
 <script setup>
 import { computed, inject, onMounted, reactive, ref } from 'vue'
+import TelemetryNotice from '../components/TelemetryNotice.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { WINDOWS } from '../api/services'
 import { SPAN_LIMITS, filterProblem, searchSpans, serviceNames } from '../api/search'
@@ -72,6 +73,7 @@ onMounted(() => {
 <template>
   <div class="page-head"><h1>Traces</h1></div>
   <section class="panel">
+    <TelemetryNotice />
     <p v-if="!connected" class="help">Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>
       <p class="help">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hostOf, histogramQuantile, isLoopback, isServerError, parseLe, podOf, workloadOf } from './workload'
+import { hostOf, histogramQuantile, instanceOf, isLoopback, isServerError, parseLe, podOf, portOf, workloadForId, workloadOf } from './workload'
 
 describe('workloadOf', () => {
   it.each([
@@ -17,8 +17,59 @@ describe('workloadOf', () => {
     expect(workloadOf('/k8s/shop/frontend-5d6f8c7b9-xk2lp/server')).toEqual({ id: '/k8s/shop/frontend', ns: 'shop', name: 'frontend', label: 'shop/frontend' })
   })
 
-  it('is null for what is not a pod', () => {
-    for (const c of ['/system.slice/sshd.service', '/docker/abc', '', undefined, '/k8s/shop']) expect(workloadOf(c)).toBeNull()
+  it('is null for what is not a container id, and for an id of Kubernetes that is not shaped like one', () => {
+    for (const c of ['', undefined, '/', '/k8s/shop', '/k8s-cronjob/x', 'not-a-path']) expect(workloadOf(c)).toBeNull()
+  })
+
+  it('makes a unit or container on a plain host an application of its own, named without the suffix', () => {
+    expect(workloadOf('/system.slice/nginx.service')).toEqual({ id: '/system.slice/nginx.service', ns: 'host', name: 'nginx', label: 'nginx', host: true })
+    expect(workloadOf('/docker/postgres')).toMatchObject({ id: '/docker/postgres', name: 'postgres', host: true })
+    expect(workloadOf('/lxc/web-1')).toMatchObject({ name: 'web-1', host: true })
+    expect(workloadOf('/system.slice/docker.slice').name).toBe('docker') // ".slice" too
+  })
+
+  it('leaves out the orchestrators it does not group, instead of mis-grouping them as hosts', () => {
+    for (const c of ['/nomad/ns/job/group/alloc/task', '/ecs/cluster/svc/task/c', '/swarm/ns/svc/task']) expect(workloadOf(c)).toBeNull()
+  })
+})
+
+describe('workloadForId', () => {
+  it('is the application for an application id: Kubernetes or host', () => {
+    expect(workloadForId('/k8s/shop/frontend')).toMatchObject({ id: '/k8s/shop/frontend', ns: 'shop', name: 'frontend' })
+    expect(workloadForId('/system.slice/nginx.service')).toMatchObject({ name: 'nginx', host: true })
+    expect(workloadForId('/docker/redis')).toMatchObject({ name: 'redis' })
+  })
+  it('is null for anything else, including a container id and a plain name', () => {
+    expect(workloadForId('/k8s/shop/frontend-5d6f8c7b9-xk2lp/server')).toBeNull()
+    expect(workloadForId('frontend')).toBeNull()
+    expect(workloadForId('')).toBeNull()
+    expect(workloadForId('/nomad/ns/job/g/a/t')).toBeNull()
+  })
+})
+
+describe('instanceOf', () => {
+  it('is the pod for a Kubernetes container, so a sidecar is not a second instance', () => {
+    const a = instanceOf({ container_id: '/k8s/shop/frontend-5d6f8c7b9-xk2lp/server' })
+    expect(instanceOf({ container_id: '/k8s/shop/frontend-5d6f8c7b9-xk2lp/istio-proxy' })).toBe(a)
+    expect(a).toBe('/k8s/shop/frontend-5d6f8c7b9-xk2lp')
+  })
+  it('is the machine for a unit on a plain host: the same unit on two machines is two instances', () => {
+    const on = (m) => instanceOf({ container_id: '/system.slice/nginx.service', machine_id: m })
+    expect(on('vm-1')).not.toBe(on('vm-2'))
+    expect(on('vm-1')).toBe(on('vm-1'))
+    expect(instanceOf({ container_id: '/system.slice/nginx.service' })).toContain('unknown-machine')
+  })
+  it('is null for what is neither', () => {
+    expect(instanceOf({ container_id: '' })).toBeNull()
+    expect(instanceOf({ container_id: '/nomad/a/b/c/d/e' })).toBeNull()
+  })
+})
+
+describe('portOf', () => {
+  it('reads the port of an address', () => {
+    expect(portOf('10.0.0.1:5432')).toBe('5432')
+    expect(portOf('[fe80::1]:443')).toBe('443')
+    for (const a of ['10.0.0.1', '::1', '', undefined, 'host:abc']) expect(portOf(a)).toBe('')
   })
 })
 

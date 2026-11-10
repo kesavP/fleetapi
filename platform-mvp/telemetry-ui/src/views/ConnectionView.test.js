@@ -39,9 +39,4 @@ describe('ConnectionView', () => {
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/applications')
   })
-
-  it('has a title', async () => {
-    const { w } = await mountView(null)
-    expect(w.get('h1').text()).toBe('Connection')
-  })
 })

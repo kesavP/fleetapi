@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { hasMetrics, loadServiceMetrics, summarizeResources, trafficFor } from './serviceMetrics'
 
 describe('hasMetrics', () => {
-  it('is true only for names the node-agent gives a pod workload', () => {
-    for (const n of ['/k8s/shop/frontend', '/k8s/data/redis', '/k8s-cronjob/ops/nightly']) expect(hasMetrics(n)).toBe(true)
-    for (const n of ['frontend', '/system.slice/sshd.service', '']) expect(hasMetrics(n)).toBe(false)
+  it('is true for an application id: a Kubernetes workload, or a unit or container on a plain host', () => {
+    for (const n of ['/k8s/shop/frontend', '/k8s/data/redis', '/k8s-cronjob/ops/nightly', '/system.slice/nginx.service', '/docker/postgres']) expect(hasMetrics(n)).toBe(true)
+  })
+  it('is false for a plain name, a container id, and an orchestrator it does not group', () => {
+    for (const n of ['frontend', '', '/k8s/shop/frontend-5d6f8c7b9-xk2lp/server', '/nomad/ns/job/g/a/t']) expect(hasMetrics(n)).toBe(false)
   })
 })
 
@@ -157,6 +159,13 @@ describe('loadServiceMetrics', () => {
     const r = await loadServiceMetrics(clientOf({ fail: all }), '/k8s/shop/b', { seconds: 600, now: NOW })
     expect(r.found).toBe(false)
     expect(r.warnings.filter((w) => w.endsWith(': denied'))).toHaveLength(Object.keys(DATA).length)
+  })
+
+  it('reads the DNS lookups of the application too', async () => {
+    const data = { ...DATA, container_dns_requests_total: [{ labels: { container_id: POD, domain: 'a.example', status: 'servfail', request_type: 'TypeA' }, points: flat(0.5) }] }
+    const r = await loadServiceMetrics(clientOf({ data }), '/k8s/shop/b', { seconds: 600, now: NOW })
+    expect(r.dns).toMatchObject({ failedRps: expect.closeTo(0.5, 9), domains: [{ domain: 'a.example' }] })
+    expect((await loadServiceMetrics(clientOf(), '/k8s/shop/b', { seconds: 600, now: NOW })).dns).toBeNull() // the project has no DNS metric
   })
 
   it('says nothing was found for a workload with no metrics', async () => {

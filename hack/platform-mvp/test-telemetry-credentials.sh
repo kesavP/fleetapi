@@ -66,6 +66,7 @@ has "--context ctx-hub -n monitoring get secret telemetry-ingest-keys" "$work/lo
 has "--context ctx-us create namespace telemetry-agent" "$work/log"
 has "--context ctx-us -n telemetry-agent create secret generic hub-telemetry-credentials --from-file=apiKey=/dev/stdin" "$work/log"
 hasnt ".read" "$work/log"                                   # the read key is never requested
+hasnt ".manage" "$work/log"                                 # nor the manage key: it can change incidents, and stays on the hub
 if grep -E -- '--context ctx-hub .*(apply|create) ' "$work/log" >/dev/null; then fail "the hub was written to"; fi
 echo "ok"
 

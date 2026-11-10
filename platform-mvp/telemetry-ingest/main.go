@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/config"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/server"
@@ -100,8 +102,24 @@ func main() {
 	pipe.Store(p)
 
 	mux := http.NewServeMux()
-	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count}).Register(mux)
-	(&server.Query{Projects: reg, Reader: s, Log: log, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 200000}).Register(mux)
+	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count, Databases: s}).Register(mux)
+	(&server.Query{Projects: reg, Reader: s, Log: log, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 200000, ShareClusterInfo: cfg.ExposeClusterInfo}).Register(mux)
+	// Incident lifecycle: read with a read or manage key, change with a manage key (see server/incidents.go). One replica only: see incident.Manager.
+	incidents := incident.NewManager(s.Incidents(), log)
+	(&server.Incidents{Projects: reg, Manager: incidents, Log: log}).Register(mux)
+	if cfg.DetectInterval > 0 {
+		dc := detect.Defaults()
+		dc.Availability, dc.Latency, dc.LatencySeconds, dc.BurnThreshold = cfg.DetectAvailability, cfg.DetectLatency, cfg.DetectLatencySeconds, cfg.DetectBurn
+		r := &detect.Runner{
+			Projects: reg.Projects, Source: s, Incidents: incidents, Config: dc, Log: log,
+			Interval: cfg.DetectInterval, Lookback: cfg.DetectLookback, MaxAge: cfg.DetectMaxAge, Step: 60, MaxSeries: 5000, MaxPoints: 1000000,
+		}
+		if err := r.Validate(); err != nil {
+			log.Error("invalid incident detection settings", "error", err)
+			os.Exit(2)
+		}
+		go r.Run(ctx)
+	}
 	app.Store(mux)
 
 	var grpcStop func()
@@ -139,7 +157,8 @@ func openStore(ctx context.Context, cfg config.Config, log *slog.Logger) *store.
 		s, err := store.Open(ctx, store.Options{
 			Addrs: cfg.ClickHouseAddrs, Database: cfg.ClickHouseDatabase, User: cfg.ClickHouseUser,
 			Password: cfg.ClickHousePassword, TLS: cfg.ClickHouseTLS, CreateDatabase: cfg.ClickHouseCreateDatabase,
-			TTL: store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles},
+			TTL:  store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles, Databases: cfg.TTLDatabases},
+			Tier: store.Tiering{Policy: cfg.StoragePolicy, Volume: cfg.ColdVolume, After: cfg.ColdAfter},
 		})
 		if err == nil {
 			mctx, cancel := context.WithTimeout(ctx, 2*time.Minute)

@@ -18,6 +18,17 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestClusterInfoIsOffUnlessAskedFor(t *testing.T) {
+	c, err := Parse([]string{"--projects-file=x"})
+	if err != nil || c.ExposeClusterInfo {
+		t.Fatalf("default must not share the platform's sizes and disks: %+v %v", c, err)
+	}
+	c, err = Parse([]string{"--projects-file=x", "--expose-cluster-info"})
+	if err != nil || !c.ExposeClusterInfo {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
 func TestPasswordFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "pw")
 	_ = os.WriteFile(p, []byte("s3cret\n"), 0o600)
@@ -48,5 +59,55 @@ func TestRejects(t *testing.T) {
 	}
 	if _, err := Parse([]string{"--projects-file=x", "--clickhouse-database=a;drop"}); err == nil || !strings.Contains(err.Error(), "clickhouse-database") {
 		t.Errorf("error should name the flag: %v", err)
+	}
+}
+
+func TestTieredStorage(t *testing.T) {
+	base := []string{"--projects-file=x"}
+	c, err := Parse(base)
+	if err != nil || c.StoragePolicy != "" || c.ColdVolume != "" || c.ColdAfter != 0 {
+		t.Fatalf("tiering must be off by default: %+v %v", c, err)
+	}
+	c, err = Parse(append(base, "--storage-policy=tiered", "--cold-volume=cold", "--cold-after=48h"))
+	if err != nil || c.StoragePolicy != "tiered" || c.ColdVolume != "cold" || c.ColdAfter != 48*time.Hour {
+		t.Fatalf("%+v %v", c, err)
+	}
+	// a policy with no move is allowed: the tables just use it
+	if _, err := Parse(append(base, "--storage-policy=tiered")); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"moves need a policy and a volume": {"--cold-after=48h"},
+		"moves need a volume":              {"--storage-policy=tiered", "--cold-after=48h"},
+		"a move before an hour":            {"--storage-policy=tiered", "--cold-volume=cold", "--cold-after=30m"},
+		"a negative move":                  {"--storage-policy=tiered", "--cold-volume=cold", "--cold-after=-1h"},
+		"moving as late as the deletion":   {"--storage-policy=tiered", "--cold-volume=cold", "--cold-after=168h", "--ttl-traces=168h"},
+		"moving after the deletion":        {"--storage-policy=tiered", "--cold-volume=cold", "--cold-after=200h"},
+		"a policy name with a quote":       {"--storage-policy=a'b"},
+		"a volume name with a quote":       {"--storage-policy=p", "--cold-volume=a'b", "--cold-after=2h"},
+	} {
+		if _, err := Parse(append(append([]string{}, base...), args...)); err == nil {
+			t.Errorf("%s: accepted %v", name, args)
+		}
+	}
+}
+
+func TestIncidentDetectionIsOffUnlessAskedFor(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DetectInterval != 0 {
+		t.Fatalf("detection is on by default: %v", c.DetectInterval)
+	}
+	if c.DetectAvailability != 0.999 || c.DetectLatency != 0.999 || c.DetectLatencySeconds != 0.5 || c.DetectBurn != 14.4 {
+		t.Fatalf("defaults = %+v", c)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--detect-interval", "1m", "--detect-burn", "6", "--detect-availability", "0.99"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DetectInterval.Minutes() != 1 || c.DetectBurn != 6 || c.DetectAvailability != 0.99 {
+		t.Fatalf("config = %+v", c)
 	}
 }

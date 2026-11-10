@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { alertLevels, buildApplications, categoryOf, loadApplications, namespaceOf, namespacesOf, statusOf } from './applications'
+import { alertLevels, buildApplications, categoryOf, createApplicationsCache, healthItems, loadApplications, namespaceOf, namespacesOf, statusOf } from './applications'
 
 const FE_POD = '/k8s/shop/frontend-5d6f8c7b9-xk2lp'
 const FE = `${FE_POD}/server`
@@ -12,6 +12,38 @@ const OLD = '/k8s/shop/legacy-7c9d8f6b5d-zzzzz/app' // a workload whose pod has 
 const g = (container_id, value, fresh = true, extra = {}) => ({ labels: { container_id, ...extra }, value, last: 1, fresh })
 const r = (container_id, rate) => ({ labels: { container_id }, rate })
 const edge = (from, to, o = {}) => ({ from, to, rps: 10, connPerSec: 1, errPct: 0, attempts: 10, failures: 0, failedConnects: 0, callErrors: 0, errBasis: 'http', p95ms: null, protocol: 'http', protocols: ['http'], unit: 'req/s', ...o })
+
+describe('applications on plain hosts', () => {
+  const NGINX = '/system.slice/nginx.service'
+  const PGD = '/docker/postgres'
+  const gm = (container_id, machine_id, value, fresh = true) => ({ labels: { container_id, machine_id }, value, last: 1, fresh })
+  const inventory = [gm(NGINX, 'vm-1', 100), gm(NGINX, 'vm-2', 100), gm(PGD, 'vm-1', 400), gm('/system.slice/old.service', 'vm-1', 5, false)]
+  const apps = buildApplications({ inventory, seconds: 600 })
+  const find = (id) => apps.find((a) => a.id === id)
+
+  it('lists a unit or container on a host as an application, in the "host" namespace, named without the suffix', () => {
+    expect(find(NGINX)).toMatchObject({ name: 'nginx', namespace: 'host', category: 'application', label: 'nginx' })
+    expect(find(PGD)).toMatchObject({ name: 'postgres', namespace: 'host' })
+  })
+
+  it('counts machines as instances: one unit on two machines is two instances of one application', () => {
+    expect(find(NGINX).instances).toEqual({ running: 2, seen: 2 })
+    expect(find(NGINX).memoryBytes).toBe(200)
+    expect(find(PGD).instances).toEqual({ running: 1, seen: 1 })
+  })
+
+  it('shows a unit that has stopped on every machine as down', () => {
+    expect(find('/system.slice/old.service').instances).toEqual({ running: 0, seen: 1 })
+    expect(statusOf(find('/system.slice/old.service'))).toBe('critical')
+  })
+
+  it('knows the namespace of a host application id, and keeps "other" for a plain name', () => {
+    expect(namespaceOf(NGINX)).toBe('host')
+    expect(namespaceOf('/docker/redis')).toBe('host')
+    expect(namespaceOf('plain-service')).toBe('other')
+    expect(categoryOf('host')).toBe('application')
+  })
+})
 
 describe('namespaces', () => {
   it('reads the namespace from a workload id, and puts anything else under "other"', () => {
@@ -231,5 +263,118 @@ describe('loadApplications', () => {
     const client = { get: async (p) => (p === 'metrics' ? ['container_resources_memory_rss_bytes'] : p === 'metrics/query_range' ? { truncated: true, series: [] } : []) }
     const r2 = await loadApplications(client, { seconds: 600, now: NOW })
     expect(r2.warnings.some((w) => w.includes('some applications may be missing'))).toBe(true)
+  })
+})
+
+describe('DNS in the applications', () => {
+  const dns = (container_id, domain, status, rate) => ({ labels: { container_id, domain, status, request_type: 'TypeA' }, rate })
+  it('summarises the lookups of each application, and is null for one that made none', () => {
+    const apps = buildApplications({ inventory: [g(FE, 1), g(CART, 1)], dns: [dns(FE, 'a.example', 'ok', 9), dns(FE, 'a.example', 'servfail', 1)], seconds: 60 })
+    const fe = apps.find((a) => a.id === '/k8s/shop/frontend')
+    expect(fe.dns).toMatchObject({ rps: 10, failedRps: 1 })
+    expect(apps.find((a) => a.id === '/k8s/shop/cartservice').dns).toBeNull()
+    expect(buildApplications({ inventory: [g(FE, 1)], seconds: 60 })[0].dns).toBeNull() // not read at all
+  })
+})
+
+describe('healthItems', () => {
+  const base = { instances: { running: 2, seen: 2 }, cpuCores: 0.2, cpuLimit: 1, memoryBytes: 100, memoryLimit: 1000, oomKills: 0, dns: { failedShare: 0 }, uniqueErrors: 0 }
+  const by = (app) => Object.fromEntries(healthItems(app).map((i) => [i.key, i]))
+
+  it('lists instances, CPU, memory, DNS and logs, each a place on the application\'s page', () => {
+    const items = healthItems(base)
+    expect(items.map((i) => [i.key, i.label, i.anchor])).toEqual([['instances', 'Instances', 'instances'], ['cpu', 'CPU', 'cpu'], ['memory', 'Memory', 'memory'], ['dns', 'DNS', 'dns'], ['logs', 'Logs', 'logs']])
+    expect(items.every((i) => i.status === 'ok')).toBe(true)
+  })
+
+  it('judges instances: none running is bad, some missing is a caution', () => {
+    expect(by({ ...base, instances: { running: 0, seen: 2 } }).instances).toMatchObject({ status: 'bad', hint: 'none of 2 running' })
+    expect(by({ ...base, instances: { running: 1, seen: 2 } }).instances).toMatchObject({ status: 'caution', hint: '1 of 2 running' })
+    expect(by({ ...base, instances: null }).instances.status).toBe('unknown')
+  })
+
+  it('judges CPU and memory against their limits, and says so when there is no limit', () => {
+    expect(by({ ...base, cpuCores: 0.85 }).cpu).toMatchObject({ status: 'caution', hint: '85% of its limit' })
+    expect(by({ ...base, cpuCores: 1.2 }).cpu.status).toBe('bad')
+    expect(by({ ...base, cpuLimit: null }).cpu).toMatchObject({ status: 'ok', hint: 'no limit set' })
+    expect(by({ ...base, cpuCores: null, cpuLimit: null }).cpu.status).toBe('unknown')
+    expect(by({ ...base, memoryBytes: 850 }).memory.status).toBe('caution')
+    expect(by({ ...base, memoryBytes: 960 }).memory.status).toBe('bad')
+    expect(by({ ...base, memoryLimit: null }).memory.hint).toBe('no limit set')
+  })
+
+  it('treats an out-of-memory kill as bad whatever the usage', () => {
+    expect(by({ ...base, oomKills: 2 }).memory).toMatchObject({ status: 'bad', hint: '2 out-of-memory kills' })
+    expect(by({ ...base, oomKills: 1 }).memory.hint).toBe('1 out-of-memory kill')
+  })
+
+  it('judges DNS by the share of lookups that fail, and logs by unique errors', () => {
+    expect(by({ ...base, dns: { failedShare: 0.02 } }).dns).toMatchObject({ status: 'caution', hint: '2% of lookups fail' })
+    expect(by({ ...base, dns: { failedShare: 0.2 } }).dns.status).toBe('bad')
+    expect(by({ ...base, dns: null }).dns.status).toBe('unknown')
+    expect(by({ ...base, uniqueErrors: 1 }).logs).toMatchObject({ status: 'caution', hint: '1 unique error' })
+    expect(by({ ...base, uniqueErrors: 3 }).logs.hint).toBe('3 unique errors')
+  })
+})
+
+describe('createApplicationsCache', () => {
+  const key = (seconds = 3600, project = 'gke') => ({ project, seconds })
+  const setup = () => {
+    let t = 1000
+    const calls = []
+    const load = vi.fn(async (client, { seconds }) => { calls.push(seconds); return { apps: [], seconds } })
+    return { cache: createApplicationsCache({ ttlMs: 30_000, now: () => t }), load, calls, tick: (ms) => (t += ms) }
+  }
+
+  it('reads once and then answers from memory, for the same project and window', async () => {
+    const { cache, load } = setup()
+    const a = await cache.get({}, { ...key(), load })
+    const b = await cache.get({}, { ...key(), load })
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(b).toBe(a)
+  })
+
+  it('shares a load that is still going instead of starting another', async () => {
+    const { cache, load } = setup()
+    await Promise.all([cache.get({}, { ...key(), load }), cache.get({}, { ...key(), load })])
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps projects and windows apart', async () => {
+    const { cache, load } = setup()
+    await cache.get({}, { ...key(3600, 'gke'), load })
+    await cache.get({}, { ...key(3600, 'dc1'), load })
+    await cache.get({}, { ...key(900, 'gke'), load })
+    expect(load).toHaveBeenCalledTimes(3)
+  })
+
+  it('reads again after it has expired, and when forced', async () => {
+    const { cache, load, tick } = setup()
+    await cache.get({}, { ...key(), load })
+    tick(29_999)
+    await cache.get({}, { ...key(), load })
+    expect(load).toHaveBeenCalledTimes(1)
+    tick(2)
+    await cache.get({}, { ...key(), load })
+    expect(load).toHaveBeenCalledTimes(2)
+    await cache.get({}, { ...key(), load, force: true })
+    expect(load).toHaveBeenCalledTimes(3)
+  })
+
+  it('forgets a load that failed, so the next call tries again', async () => {
+    const { cache } = setup()
+    const load = vi.fn().mockRejectedValueOnce(new Error('down')).mockResolvedValue({ apps: [] })
+    await expect(cache.get({}, { ...key(), load })).rejects.toThrow('down')
+    await Promise.resolve()
+    await expect(cache.get({}, { ...key(), load })).resolves.toEqual({ apps: [] })
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('can be emptied', async () => {
+    const { cache, load } = setup()
+    await cache.get({}, { ...key(), load })
+    cache.clear()
+    await cache.get({}, { ...key(), load })
+    expect(load).toHaveBeenCalledTimes(2)
   })
 })
