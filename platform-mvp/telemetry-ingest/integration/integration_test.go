@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +30,9 @@ import (
 	"github.com/golang/snappy"
 	"github.com/google/pprof/profile"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/inventory"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/model"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
@@ -1469,5 +1472,440 @@ func TestDetectorOnStoredCounters(t *testing.T) {
 	if n, err = (&detect.Runner{Projects: func() []string { return []string{"eu"} }, Source: r.st, Incidents: mgr, Config: detect.Defaults(), Log: log,
 		Interval: time.Minute, Lookback: 3 * time.Hour, MaxAge: 30 * time.Minute, Step: 60, MaxSeries: 100, MaxPoints: 100000}).Project(ctx, "eu"); err != nil || n != 0 {
 		t.Fatalf("eu opened %d, err %v", n, err)
+	}
+}
+
+// What a cluster collector reports, as ClickHouse keeps it: versions of each object, what is current, what a delete and a sweep do, events
+// that change their count, the heartbeat, and the walls between projects and between clusters.
+func TestInventoryInClickHouse(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC().Truncate(time.Millisecond).Add(-10 * time.Minute)
+	dep := func(uid, name string, desired int) inventory.Object {
+		return inventory.Object{Kind: inventory.Deployment, UID: uid, Namespace: "shop", Name: name, Labels: map[string]string{"app": name}, Created: t0.Add(-time.Hour),
+			Data: map[string]any{"desired": desired, "ready": desired}}
+	}
+	send := func(project string, b inventory.Batch) {
+		t.Helper()
+		if err := b.Validate(time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.st.WriteInventoryBatch(ctx, project, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(project, cluster string, kinds ...string) map[string]store.InventoryObject {
+		t.Helper()
+		rows, err := r.st.ListInventory(ctx, store.InventoryQuery{Project: project, Cluster: cluster, Kinds: kinds, Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]store.InventoryObject{}
+		for _, o := range rows {
+			out[o.Name] = o
+		}
+		return out
+	}
+
+	// a first, full report: three deployments and a node
+	node := inventory.Object{Kind: inventory.Node, UID: "node-1", Name: "node-a", Created: t0.Add(-24 * time.Hour), Data: map[string]any{"ready": true}}
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: t0, Objects: []inventory.Object{dep("d1", "cartservice", 3), dep("d2", "adservice", 2), dep("d3", "paymentservice", 1), node}})
+	got := list("us", "", inventory.Deployment)
+	if len(got) != 3 || string(got["cartservice"].Data) != `{"desired":3,"ready":3}` || got["cartservice"].Labels["app"] != "cartservice" || got["cartservice"].Namespace != "shop" {
+		t.Fatalf("after the first report: %+v", got)
+	}
+	if n := list("us", "", inventory.Node); len(n) != 1 || n["node-a"].Namespace != "" {
+		t.Fatalf("nodes: %+v", n)
+	}
+
+	// one is scaled to zero: its newest version is what is current, and the history keeps the old one
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: t0.Add(time.Minute), Objects: []inventory.Object{dep("d1", "cartservice", 0)}})
+	if got = list("us", "", inventory.Deployment); len(got) != 3 || string(got["cartservice"].Data) != `{"desired":0,"ready":0}` || !got["cartservice"].Observed.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("after the change: %+v", got)
+	}
+	hist, err := r.st.InventoryHistory(ctx, "us", "gke", inventory.Deployment, "d1", 10)
+	if err != nil || len(hist) != 2 || string(hist[0].Data) != `{"desired":0,"ready":0}` || string(hist[1].Data) != `{"desired":3,"ready":3}` {
+		t.Fatalf("history: %+v %v", hist, err)
+	}
+	// the same report sent again (a retry) is one version, not two
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: t0.Add(time.Minute), Objects: []inventory.Object{dep("d1", "cartservice", 0)}})
+	if hist, _ = r.st.InventoryHistory(ctx, "us", "gke", inventory.Deployment, "d1", 10); len(hist) != 2 {
+		t.Fatalf("a retried batch made %d versions", len(hist))
+	}
+
+	// a delete
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: t0.Add(2 * time.Minute), Deleted: []inventory.Ref{{Kind: inventory.Deployment, UID: "d2", Namespace: "shop", Name: "adservice"}}})
+	if got = list("us", "", inventory.Deployment); len(got) != 2 || got["adservice"].UID != "" {
+		t.Fatalf("after the delete: %+v", got)
+	}
+	if hist, _ = r.st.InventoryHistory(ctx, "us", "gke", inventory.Deployment, "d2", 10); len(hist) != 2 || !hist[0].Deleted || hist[1].Deleted {
+		t.Fatalf("the deleted object's history: %+v", hist)
+	}
+
+	// a resync that re-sends cartservice only, then sweeps: paymentservice was not re-sent, so it is gone
+	cut := t0.Add(10 * time.Minute)
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: cut, Objects: []inventory.Object{dep("d1", "cartservice", 0)}, Sweeps: []inventory.Sweep{{Kind: inventory.Deployment, Before: cut}}})
+	if got = list("us", "", inventory.Deployment); len(got) != 1 || got["cartservice"].UID != "d1" {
+		t.Fatalf("after the sweep: %+v", got)
+	}
+	// the sweep of one kind leaves the others alone
+	if n := list("us", "", inventory.Node); len(n) != 1 {
+		t.Fatalf("a deployment sweep removed a node: %+v", n)
+	}
+	// and an object that comes back after being swept is current again
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: cut.Add(time.Minute), Objects: []inventory.Object{dep("d3", "paymentservice", 1)}})
+	if got = list("us", "", inventory.Deployment); len(got) != 2 {
+		t.Fatalf("after it came back: %+v", got)
+	}
+
+	// filters
+	rows, _ := r.st.ListInventory(ctx, store.InventoryQuery{Project: "us", Kinds: []string{inventory.Deployment}, Namespace: "shop", Name: "paymentservice", Limit: 10})
+	if len(rows) != 1 {
+		t.Fatalf("by name: %+v", rows)
+	}
+	if rows, _ = r.st.ListInventory(ctx, store.InventoryQuery{Project: "us", Kinds: []string{inventory.Deployment}, Namespace: "other", Limit: 10}); len(rows) != 0 {
+		t.Fatalf("by another namespace: %+v", rows)
+	}
+	if rows, _ = r.st.ListInventory(ctx, store.InventoryQuery{Project: "us", Kinds: []string{inventory.Deployment}, Limit: 1}); len(rows) != 1 {
+		t.Fatalf("a limit of one: %+v", rows)
+	}
+	if _, err := r.st.ListInventory(ctx, store.InventoryQuery{Project: "us", Kinds: []string{"x'; DROP TABLE inventory_objects; --"}, Limit: 1}); err == nil {
+		t.Fatal("a kind that is not one of the known was spliced into a query")
+	}
+
+	// walls: another project, and another cluster of this one
+	if n := list("eu", "", inventory.Deployment); len(n) != 0 {
+		t.Fatalf("eu sees us's objects: %+v", n)
+	}
+	send("us", inventory.Batch{Version: 1, Cluster: "aks", CollectedAt: cut.Add(2 * time.Minute), Objects: []inventory.Object{dep("a1", "frontend", 2)}})
+	if n := list("us", "aks", inventory.Deployment); len(n) != 1 || n["frontend"].Cluster != "aks" {
+		t.Fatalf("by cluster: %+v", n)
+	}
+	if n := list("us", "gke", inventory.Deployment); len(n) != 2 || n["frontend"].UID != "" {
+		t.Fatalf("a cluster's own: %+v", n)
+	}
+	// a sweep in one cluster does not touch another's objects
+	send("us", inventory.Batch{Version: 1, Cluster: "aks", CollectedAt: cut.Add(3 * time.Minute), Sweeps: []inventory.Sweep{{Kind: inventory.Deployment, Before: cut.Add(3 * time.Minute)}}})
+	if n := list("us", "gke", inventory.Deployment); len(n) != 2 {
+		t.Fatalf("aks's sweep removed gke's objects: %+v", n)
+	}
+	if n := list("us", "aks", inventory.Deployment); len(n) != 0 {
+		t.Fatalf("aks's sweep did not remove its own: %+v", n)
+	}
+	// no cluster named: the project's name is used
+	send("eu", inventory.Batch{Version: 1, CollectedAt: cut, Objects: []inventory.Object{dep("e1", "web", 1)}})
+	if n := list("eu", "eu", inventory.Deployment); len(n) != 1 {
+		t.Fatalf("the default cluster name: %+v", n)
+	}
+
+	// events: the same event again with a higher count is one event, as it last stood
+	ev := func(count int, at time.Time) inventory.Event {
+		return inventory.Event{UID: "ev-1", Namespace: "shop", Kind: "Pod", Name: "cart-0", Type: "Warning", Reason: "BackOff", Message: "Back-off restarting failed container", Count: count, First: t0, Last: at, Source: "kubelet"}
+	}
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: cut, Events: []inventory.Event{ev(1, t0.Add(time.Minute)), {UID: "ev-2", Namespace: "shop", Kind: "Deployment", Name: "cartservice", Type: "Normal", Reason: "ScalingReplicaSet", Message: "Scaled down", Count: 1, Last: t0.Add(2 * time.Minute)}}})
+	send("us", inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: cut.Add(time.Minute), Events: []inventory.Event{ev(5, t0.Add(5*time.Minute))}})
+	evs, err := r.st.ListInventoryEvents(ctx, store.InventoryEventQuery{Project: "us", From: t0.Add(-time.Hour), To: time.Now(), Limit: 10})
+	if err != nil || len(evs) != 2 || evs[0].UID != "ev-1" || evs[0].Count != 5 || !evs[0].Last.Equal(t0.Add(5*time.Minute)) || !evs[0].First.Equal(t0) || evs[0].Source != "kubelet" {
+		t.Fatalf("events: %+v %v", evs, err)
+	}
+	if evs, _ = r.st.ListInventoryEvents(ctx, store.InventoryEventQuery{Project: "us", Type: "Warning", Reason: "BackOff", Kind: "Pod", Namespace: "shop", Name: "cart-0", From: t0.Add(-time.Hour), To: time.Now(), Limit: 10}); len(evs) != 1 {
+		t.Fatalf("filtered events: %+v", evs)
+	}
+	if evs, _ = r.st.ListInventoryEvents(ctx, store.InventoryEventQuery{Project: "eu", From: t0.Add(-time.Hour), To: time.Now(), Limit: 10}); len(evs) != 0 {
+		t.Fatalf("eu sees us's events: %+v", evs)
+	}
+	if evs, _ = r.st.ListInventoryEvents(ctx, store.InventoryEventQuery{Project: "us", From: t0.Add(-time.Hour), To: t0.Add(90 * time.Second), Limit: 10}); len(evs) != 1 || evs[0].UID != "ev-1" {
+		t.Fatalf("by time: %+v", evs)
+	}
+
+	// the summary: every cluster that has reported, when, and what is in it now
+	sum, err := r.st.InventorySummary(ctx, "us")
+	if err != nil || len(sum) != 2 || sum[0].Cluster != "aks" || sum[1].Cluster != "gke" {
+		t.Fatalf("summary: %+v %v", sum, err)
+	}
+	gke := sum[1]
+	if gke.Counts[inventory.Deployment] != 2 || gke.Counts[inventory.Node] != 1 || time.Since(gke.LastReceived) > time.Minute || !gke.LastCollected.Equal(cut.Add(time.Minute)) {
+		t.Fatalf("gke: %+v", gke)
+	}
+	if sum, _ = r.st.InventorySummary(ctx, "nobody"); len(sum) != 0 || sum == nil {
+		t.Fatalf("an unknown project: %+v", sum)
+	}
+}
+
+// Silence on what ClickHouse holds: the cluster collector's inventory beside the node-agent's memory gauge. The payment service wants three and has
+// none (and stopped sending twenty minutes ago), the ad service is ready and stopped, the cart was scaled to zero, the frontend is sending.
+func TestDetectorSilenceOnStoredInventory(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Minute)
+	clock := base
+	dep := func(name string, desired, ready int) inventory.Object {
+		return inventory.Object{Kind: inventory.Deployment, UID: "d-" + name, Namespace: "shop", Name: name, Created: base.Add(-24 * time.Hour), Data: map[string]any{"desired": desired, "ready": ready}}
+	}
+	pod := func(workload string) inventory.Object {
+		return inventory.Object{Kind: inventory.Pod, UID: "p-" + workload, Namespace: "shop", Name: workload + "-5d6f8c7b9-xk2lp", Created: base.Add(-time.Hour), Data: map[string]any{
+			"phase": "Running", "ready": false, "workload_kind": "deployment", "workload_name": workload,
+			"containers": []any{map[string]any{"name": "app", "state": "waiting", "reason": "CrashLoopBackOff", "last_reason": "OOMKilled"}}}}
+	}
+	batch := inventory.Batch{Version: 1, Cluster: "gke", CollectedAt: base, Objects: []inventory.Object{
+		dep("frontend", 2, 2), dep("cartservice", 0, 0), dep("paymentservice", 3, 0), dep("adservice", 1, 1), pod("paymentservice"),
+	}}
+	if err := batch.Validate(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.WriteInventoryBatch(ctx, "us", batch); err != nil {
+		t.Fatal(err)
+	}
+
+	// the memory gauge: one reading a minute; the frontend up to now and beyond (so it is still sending when the clock moves), the others until twenty minutes ago
+	var samples []model.Sample
+	var series []model.Series
+	gauge := func(hash uint64, container string, until time.Time) {
+		series = append(series, model.Series{Project: "us", Name: detect.RSSMetric, Hash: hash, Labels: map[string]string{"container_id": container}, Seen: base})
+		for at := base.Add(-50 * time.Minute); !at.After(until); at = at.Add(time.Minute) {
+			samples = append(samples, model.Sample{Project: "us", Name: detect.RSSMetric, Hash: hash, Time: at, Value: 1 << 20})
+		}
+	}
+	gauge(1, "/k8s/shop/frontend-5d6f8c7b9-xk2lp/app", base.Add(10*time.Minute))
+	gauge(2, "/k8s/shop/cartservice-5d6f8c7b9-xk2lp/app", base.Add(-20*time.Minute))
+	gauge(3, "/k8s/shop/paymentservice-5d6f8c7b9-xk2lp/app", base.Add(-20*time.Minute))
+	gauge(4, "/k8s/shop/adservice-5d6f8c7b9-xk2lp/app", base.Add(-20*time.Minute))
+	if err := r.st.WriteSeries(ctx, series); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.WriteSamples(ctx, samples); err != nil {
+		t.Fatal(err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := incident.NewManager(r.st.Incidents(), log)
+	newRunner := func(m *incident.Manager) *detect.Runner {
+		return &detect.Runner{
+			Projects: func() []string { return []string{"us"} }, Source: r.st, Incidents: m, Config: detect.Defaults(), Log: log,
+			Interval: time.Minute, Lookback: 3 * time.Hour, MaxAge: 30 * time.Minute, Step: 60, MaxSeries: 100, MaxPoints: 100000,
+			SilenceAfter: 5 * time.Minute, Now: func() time.Time { return clock },
+		}
+	}
+	run := newRunner(mgr)
+	if err := run.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := run.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("the first look opened %d, err %v", n, err)
+	}
+	clock = base.Add(6 * time.Minute)
+	n, err := run.Project(ctx, "us")
+	if err != nil || n != 2 {
+		t.Fatalf("after the delay: opened %d, err %v", n, err)
+	}
+	if n, err = run.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("a second look opened %d, err %v", n, err)
+	}
+	// a restart: a new runner over the same database starts its count again, and does not open what is already open
+	run2 := newRunner(incident.NewManager(r.st.Incidents(), log))
+	if n, err = run2.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("after a restart: %d, %v", n, err)
+	}
+	clock = base.Add(12 * time.Minute)
+	if n, err = run2.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("after a restart and the delay: %d, %v (they are open already)", n, err)
+	}
+
+	got := map[string]incident.Incident{}
+	list, _, err := mgr.List(ctx, "us", incident.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range list {
+		got[i.App] = i
+	}
+	pay, ad := got["/k8s/shop/paymentservice"], got["/k8s/shop/adservice"]
+	if len(got) != 2 || pay.Severity != incident.Critical || pay.Title != "shop/paymentservice: not ready (0 of 3)" || ad.Severity != incident.Warning || ad.Title != "shop/adservice: ready but sending no data" {
+		t.Fatalf("incidents: %+v", got)
+	}
+	if d := pay.StartedAt.Sub(base.Add(-20 * time.Minute)); d < -time.Minute || d > time.Minute {
+		t.Fatalf("it began at its last reading (%v), not %v", base.Add(-20*time.Minute), pay.StartedAt)
+	}
+	if !strings.Contains(pay.Summary, "CrashLoopBackOff (OOMKilled)") || len(pay.Evidence) != 2 {
+		t.Fatalf("summary %q, evidence %d", pay.Summary, len(pay.Evidence))
+	}
+}
+
+// Enrollment against ClickHouse: a token made with a manage key, redeemed once for an ingest key of the cluster's own, which the real ingest
+// handler then accepts; and what survives a restart, what a revoke does, and that neither the token nor the key is ever in the table.
+func TestEnrollmentInClickHouse(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	cfg := t.TempDir() + "/projects.json"
+	_ = os.WriteFile(cfg, []byte(fmt.Sprintf(`{"projects":[
+	 {"name":"us","ingestKeys":[%q],"readKeys":[%q],"manageKeys":[%q]},
+	 {"name":"eu","ingestKeys":[%q],"readKeys":[%q],"manageKeys":[%q]}]}`, usIngest, usRead, usManageKey, euIngest, euRead, euManageKey)), 0o600)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// a service: what main wires, built from the same pieces, so that a "restart" is building it again over the same database
+	start := func() (*httptest.Server, *project.Registry, *enroll.Manager) {
+		reg, err := project.Load(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := enroll.NewManager(r.st.Enrollments())
+		refresh := func() {
+			keys, err := m.Keys(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			issued := map[[32]byte]string{}
+			for _, k := range keys {
+				issued[k.Hash] = k.Project
+			}
+			reg.SetIssuedIngest(issued)
+		}
+		m.OnKeys = refresh
+		refresh()
+		mux := http.NewServeMux()
+		(&server.Enroll{Projects: reg, Manager: m, Log: log, Count: server.NewCounters()}).Register(mux)
+		(&server.Ingest{Projects: reg, Sink: nopSink{}, MaxBody: 1 << 20, Log: log, Count: server.NewCounters(), Inventory: r.st}).Register(mux)
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		return srv, reg, m
+	}
+	call := func(srv *httptest.Server, method, path, key string, body any) (int, string) {
+		var rd io.Reader
+		if body != nil {
+			raw, _ := json.Marshal(body)
+			rd = bytes.NewReader(raw)
+		}
+		req, _ := http.NewRequest(method, srv.URL+path, rd)
+		if key != "" {
+			req.Header.Set("X-API-Key", key)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		raw, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(raw)
+	}
+	heartbeat := func(srv *httptest.Server, key string) int {
+		code, _ := call(srv, "POST", "/v1/inventory", key, map[string]any{"version": 1, "cluster": "gke", "collected_at": time.Now().UTC().Format(time.RFC3339Nano)})
+		return code
+	}
+	field := func(body, name string) string {
+		var m struct{ Data map[string]any }
+		if err := json.Unmarshal([]byte(body), &m); err != nil {
+			t.Fatalf("%v: %s", err, body)
+		}
+		s, _ := m.Data[name].(string)
+		return s
+	}
+
+	srv, _, _ := start()
+	code, body := call(srv, "POST", "/api/v1/projects/us/enrollments", usManageKey, map[string]any{"cluster": "gke"})
+	if code != 201 {
+		t.Fatalf("%d %s", code, body)
+	}
+	token, id := field(body, "token"), field(body, "id")
+
+	// nothing but the token is needed, and it makes a manifest the cluster applies
+	code, manifest := call(srv, "POST", "/v1/enroll?format=secret", "", map[string]any{"token": token})
+	if code != 200 || !strings.Contains(manifest, "kind: Secret") {
+		t.Fatalf("%d %s", code, manifest)
+	}
+	key := strings.Split(strings.Split(manifest, `apiKey: "`)[1], `"`)[0]
+	if !strings.HasPrefix(key, "ing_") {
+		t.Fatalf("key %q", key)
+	}
+	if code := heartbeat(srv, key); code != 200 {
+		t.Fatalf("the issued key was not accepted by the ingest handler: %d", code)
+	}
+	if code := heartbeat(srv, "ing_"+strings.Repeat("Z", 43)); code != 401 {
+		t.Fatalf("a key that was never issued: %d", code)
+	}
+	if code, _ := call(srv, "POST", "/v1/enroll", "", map[string]any{"token": token}); code != 401 {
+		t.Fatalf("the token redeemed twice: %d", code)
+	}
+
+	// neither secret is anywhere in the table
+	events, err := r.st.Enrollments().All(ctx)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("%d events, %v", len(events), err)
+	}
+	for _, e := range events {
+		for _, f := range []string{e.Project, e.ID, e.Actor, e.Cluster, e.TokenHash, e.KeyHash} {
+			if strings.Contains(f, strings.TrimPrefix(token, "enr_")) || strings.Contains(f, strings.TrimPrefix(key, "ing_")) {
+				t.Fatalf("a secret is stored: %+v", e)
+			}
+		}
+	}
+	if events[0].Type != enroll.EvCreated || events[1].Type != enroll.EvRedeemed || len(events[0].TokenHash) != 64 || len(events[1].KeyHash) != 64 {
+		t.Fatalf("%+v", events)
+	}
+
+	// a restart: a new service over the same database takes the issued key up again, and the token is still spent
+	srv2, reg2, _ := start()
+	if p, ok := reg2.IngestProject(key); !ok || p != "us" {
+		t.Fatalf("after a restart the issued key is not accepted: %q %v", p, ok)
+	}
+	if code := heartbeat(srv2, key); code != 200 {
+		t.Fatalf("after a restart: %d", code)
+	}
+	if code, _ := call(srv2, "POST", "/v1/enroll", "", map[string]any{"token": token}); code != 401 {
+		t.Fatalf("a spent token after a restart: %d", code)
+	}
+	// and the listing says what happened
+	code, list := call(srv2, "GET", "/api/v1/projects/us/enrollments", usRead, nil)
+	if code != 200 || !strings.Contains(list, `"status":"redeemed"`) || !strings.Contains(list, `"cluster":"gke"`) || strings.Contains(list, token) {
+		t.Fatalf("%d %s", code, list)
+	}
+	// another project sees none of it
+	if code, list := call(srv2, "GET", "/api/v1/projects/eu/enrollments", euRead, nil); code != 200 || strings.Contains(list, id) {
+		t.Fatalf("%d %s", code, list)
+	}
+
+	// a revoke cuts the key off, here and after another restart
+	if code, body := call(srv2, "DELETE", "/api/v1/projects/us/enrollments/"+id, usManageKey, nil); code != 200 || !strings.Contains(body, `"status":"revoked"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if code := heartbeat(srv2, key); code != 401 {
+		t.Fatalf("a revoked key was accepted: %d", code)
+	}
+	srv3, _, _ := start()
+	if code := heartbeat(srv3, key); code != 401 {
+		t.Fatalf("a revoked key was accepted after a restart: %d", code)
+	}
+	// the key from the projects file never stopped working
+	if code := heartbeat(srv3, usIngest); code != 200 {
+		t.Fatalf("the file's own key: %d", code)
+	}
+
+	// many at once: one token, twenty clusters, one key
+	_, body = call(srv3, "POST", "/api/v1/projects/us/enrollments", usManageKey, map[string]any{"cluster": "aks"})
+	token2 := field(body, "token")
+	var wg sync.WaitGroup
+	var won atomic.Int32
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code, _ := call(srv3, "POST", "/v1/enroll", "", map[string]any{"token": token2}); code == 200 {
+				won.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if won.Load() != 1 {
+		t.Fatalf("%d redeemed one token", won.Load())
+	}
+	events, _ = r.st.Enrollments().All(ctx)
+	var redeemed int
+	for _, e := range events {
+		if e.Type == enroll.EvRedeemed {
+			redeemed++
+		}
+	}
+	if redeemed != 2 {
+		t.Fatalf("%d redemptions recorded (two enrollments)", redeemed)
 	}
 }

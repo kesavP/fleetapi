@@ -39,6 +39,12 @@ APPS.forEach(([ns, name, n, type, mem, cpu, restarts], a) => {
 // Service (cluster) addresses: what an app dials, which the kernel translates to a pod. Redis is reached through one.
 const SERVICE_IP = { redisCart: '10.96.0.50:8080' }
 const GONE = { id: pod('shop', 'checkoutservice', HASH[2], 'gn7kq', 'checkoutservice'), ns: 'shop', name: 'checkoutservice', ip: '10.4.2.99' }
+// INVENTORY=1: the cluster collector is installed. Some applications have stopped sending data, and the inventory says why: the cart and the ads
+// were scaled to zero, the gateway wants one and has none (crash-looping), the recommendation service is ready and was never seen, and an old
+// service is gone from the cluster but still has a reading in the window.
+const INVENTORY = process.env.INVENTORY === '1'
+const STALE = INVENTORY ? new Set(['shop/cartservice', 'shop/adservice', 'payments/gateway']) : new Set()
+const OLD = { id: pod('shop', 'oldservice', HASH[1], 'zl4dq', 'oldservice') }
 const idOf = (ns, name) => containers.find((c) => c.ns === ns && c.name === name)
 const ip = (ns, name) => idOf(ns, name).ip
 
@@ -184,8 +190,9 @@ function series(name, from, to, step = 15) {
   if (incident) return incident
   const out = []
   if (name === 'container_resources_memory_rss_bytes') {
-    for (const c of containers) out.push(gauge({ container_id: c.id }, to, c.mem))
+    for (const c of containers) out.push(gauge({ container_id: c.id }, to, c.mem, !STALE.has(`${c.ns}/${c.name}`)))
     out.push(gauge({ container_id: GONE.id }, to, 50 * 1024 * 1024, false))
+    if (INVENTORY) out.push(gauge({ container_id: OLD.id }, to, 40 * 1024 * 1024, false))
   } else if (name === 'container_resources_memory_limit_bytes') {
     for (const c of containers) out.push(gauge({ container_id: c.id }, to, c.mem * 2))
   } else if (name === 'container_resources_cpu_usage_seconds_total') {
@@ -267,10 +274,71 @@ function demoClickHouse() {
   }
 }
 
+// What each workload is set to run: every demo application as many as it has pods, but for the ones that stopped sending (see STALE).
+function workloads() {
+  const row = (ns, name, desired, ready) => ({ cluster: 'demo', kind: 'deployment', uid: `${ns}-${name}`, namespace: ns, name, labels: {}, created: iso(86400), observed: iso(15), data: { desired, ready, available: ready } })
+  const rows = APPS.map(([ns, name, n]) => {
+    if (ns === 'shop' && (name === 'cartservice' || name === 'adservice')) return row(ns, name, 0, 0)
+    if (ns === 'payments' && name === 'gateway') return row(ns, name, 1, 0)
+    return row(ns, name, n, n)
+  })
+  rows.push(row('shop', 'recommendationservice', 2, 2)) // ready, and the node-agent has never named it
+  return rows
+}
+
+// Enrollment, in memory: enough of the service's API for the Clusters tab. The manage key is MANAGE_KEY (default demo-manage-key). A token can be redeemed
+// at POST /v1/enroll (which the UI's proxy does not pass: a test calls it directly, as the cluster would).
+const MANAGE_KEY = process.env.MANAGE_KEY || 'demo-manage-key'
+const enrollments = []
+const b64u = (n) => Buffer.from(Array.from({ length: n }, (_, i) => (i * 37 + Date.now() + enrollments.length * 11) % 256)).toString('base64url')
+function demoEnrollments(req, res, path, body, send) {
+  const isoNow = new Date().toISOString()
+  for (const e of enrollments) if (e.status === 'pending' && Date.parse(e.expires_at) <= Date.now()) e.status = 'expired'
+  if (path === 'enrollments' && req.method === 'GET') return send(200, { data: [...enrollments].reverse().map((e) => Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'token'))) })
+  if (req.headers['x-api-key'] !== MANAGE_KEY) return send(403, { error: 'this key cannot change that project\'s enrollments' })
+  if (path === 'enrollments' && req.method === 'POST') {
+    let b
+    try { b = JSON.parse(body || '{}') } catch { return send(400, { error: 'the request body is not valid for this call' }) }
+    if (!/^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$/.test(b.cluster || '')) return send(400, { error: 'cluster must be lower-case letters, digits and . _ -, starting and ending with a letter or digit' })
+    const e = { id: Array.from({ length: 12 }, (_, i) => '0123456789abcdef'[(Date.now() + i * 7 + enrollments.length) % 16]).join(''), project: PROJECT, cluster: b.cluster, status: 'pending', created_at: isoNow, created_by: req.headers['x-actor'] || 'api', expires_at: new Date(Date.now() + (b.ttl_minutes || 15) * 60000).toISOString(), token: 'enr_' + b64u(32).slice(0, 43).padEnd(43, 'A') }
+    enrollments.push(e)
+    return send(201, { data: e })
+  }
+  const m = /^enrollments\/([0-9a-f]{12})$/.exec(path)
+  if (m && req.method === 'DELETE') {
+    const e = enrollments.find((x) => x.id === m[1])
+    if (!e) return send(404, { error: 'no such enrollment' })
+    e.status = 'revoked'; e.revoked_at = isoNow; e.revoked_by = req.headers['x-actor'] || 'api'
+    return send(200, { data: e })
+  }
+  return send(404, { error: 'not found' })
+}
+
 export function createDemoApi() {
   return (req, res) => {
     const url = new URL(req.url, 'http://x')
     const send = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname === '/v1/enroll' && req.method === 'POST') {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        const e = enrollments.find((x) => x.token === (JSON.parse(raw || '{}').token))
+        if (!e || e.status !== 'pending') return send(401, { error: 'the enrollment token is invalid, expired or already used' })
+        e.status = 'redeemed'; e.redeemed_at = new Date().toISOString()
+        send(200, { data: { project: PROJECT, cluster: e.cluster, enrollment: e.id, ingest_key: 'ing_demo' } })
+      })
+      return
+    }
+    if (/^\/api\/v1\/projects\/[^/]+\/enrollments/.test(url.pathname) && req.method !== 'GET') {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        const m2 = /^\/api\/v1\/projects\/([^/]+)\/(.*)$/.exec(url.pathname)
+        if (m2[1] !== PROJECT) return send(403, { error: 'this key cannot read that project' })
+        demoEnrollments(req, res, m2[2], raw, send)
+      })
+      return
+    }
     const m = /^\/api\/v1\/projects\/([^/]+)\/(.*)$/.exec(url.pathname)
     if (!m) return send(404, { error: 'not found' })
     if (req.headers['x-api-key'] !== KEY) return send(403, { error: 'this key cannot read that project' })
@@ -279,6 +347,10 @@ export function createDemoApi() {
     const q = url.searchParams
     // NO_AGENT=1: a project nothing has reported to; NO_AGENT=other: one that only has metrics from something that is not the node-agent
     if (path === 'metrics') return send(200, { data: process.env.NO_AGENT === '1' ? [] : process.env.NO_AGENT === 'other' ? ['up', 'node_cpu_seconds_total'] : METRICS })
+    if (path === 'enrollments') return demoEnrollments(req, res, path, '', send)
+    if (path === 'inventory') return send(200, { data: INVENTORY ? [{ cluster: 'demo', last_received: iso(20), last_collected: iso(20), counts: { deployment: APPS.length } }] : [] })
+    if (path === 'inventory/workloads') return send(200, { data: INVENTORY ? workloads() : [] })
+    if (path === 'inventory/pods') return send(200, { data: INVENTORY ? [0, 1].map((i) => ({ cluster: 'demo', kind: 'pod', uid: `gw${i}`, namespace: 'payments', name: `gateway-6c5d8f7b9d-pod${i}`, observed: iso(10), data: { phase: 'Running', ready: false, workload_kind: 'deployment', workload_name: 'gateway', containers: [{ name: 'gateway', state: 'waiting', reason: 'CrashLoopBackOff', last_reason: 'OOMKilled' }] } })) : [] })
     if (path === 'metrics/query_range') return send(200, { data: { series: series(q.get('name'), Number(q.get('from')), Number(q.get('to')), Number(q.get('step')) || 15) } })
     if (path === 'traces/services') return send(200, { data: SERVICES })
     if (path === 'logs/services') return send(200, { data: ['/k8s/shop/adservice', '/k8s/shop/cartservice', '/k8s/monitoring/prometheus'] })

@@ -110,6 +110,15 @@ const num = (x) => (x >= 100 ? String(Math.round(x)) : x >= 10 ? x.toFixed(1) : 
 const cores = (c) => (c == null ? '–' : c >= 10 ? c.toFixed(1) : String(Math.round(c * 1000) / 1000))
 const pct = (x) => `${Math.round(x * 10) / 10}%`
 const label = (key) => STATUSES.find((s) => s.key === key).label
+
+// Instances: what the application is SET to run and how many are ready, when the cluster collector says (the truth about a scale-down);
+// otherwise what the node-agent sees running. Zero running is not painted as a failure by itself: the Silent status says what it is.
+const instText = (a) => (a.workload ? `${a.workload.ready}/${a.workload.desired}` : a.instances ? `${a.instances.running}/${a.instances.seen}` : '–')
+const instTitle = (a) => (a.workload ? 'ready / set to run, from the cluster' : a.instances ? 'running / seen, from the node-agent' : null)
+const instClass = (a) =>
+  a.workload
+    ? { bad: a.workload.desired > 0 && a.workload.ready === 0, caution: a.workload.ready > 0 && a.workload.ready < a.workload.desired }
+    : { caution: !!a.instances && a.instances.running > 0 && a.instances.running < a.instances.seen }
 </script>
 
 <template>
@@ -167,12 +176,13 @@ const label = (key) => STATUSES.find((s) => s.key === key).label
                 <td class="app-cell" :title="label(a.status)">
                   <router-link :to="{ name: 'application', params: { name: a.id } }">{{ a.name }}</router-link>
                   <small v-if="several" class="muted ns">{{ a.namespace }}</small>
+                  <small v-if="a.silence" class="silence" :class="`tone-${a.silence.tone}`" :title="a.silence.detail" data-testid="silence">{{ a.silence.label }}<template v-if="a.silence.cause === 'not-ready'"> · {{ a.workload.ready }}/{{ a.workload.desired }}</template></small>
                 </td>
                 <td>{{ a.type || '–' }}</td>
                 <td class="num">{{ a.traffic ? `${num(a.traffic.rps)}/s` : '–' }}</td>
                 <td class="num" :class="{ bad: a.traffic && a.traffic.errPct >= 5, caution: a.traffic && a.traffic.errPct >= 1 && a.traffic.errPct < 5 }">{{ a.traffic ? pct(a.traffic.errPct) : '–' }}</td>
                 <td class="num" :class="{ caution: a.upstreams && a.upstreams.ok < a.upstreams.total }">{{ a.upstreams ? `${a.upstreams.ok}/${a.upstreams.total}` : '–' }}</td>
-                <td class="num" :class="{ bad: a.instances && a.instances.running === 0, caution: a.instances && a.instances.running > 0 && a.instances.running < a.instances.seen }">{{ a.instances ? `${a.instances.running}/${a.instances.seen}` : '–' }}</td>
+                <td class="num" :class="instClass(a)" :title="instTitle(a)">{{ instText(a) }}</td>
                 <td class="num" :class="{ caution: a.restarts > 0 }">{{ a.restarts == null ? '–' : a.restarts }}</td>
                 <td class="num" :title="a.cpuLimit ? `limit ${cores(a.cpuLimit)} cores` : null">{{ cores(a.cpuCores) }}</td>
                 <td class="num" :title="a.memoryLimit ? `limit ${formatBytes(a.memoryLimit)}` : null">{{ a.memoryBytes == null ? '–' : formatBytes(a.memoryBytes) }}</td>

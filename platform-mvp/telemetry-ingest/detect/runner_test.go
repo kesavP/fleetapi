@@ -30,6 +30,42 @@ type fakeSource struct {
 	listErr   map[string]error
 	truncated bool
 	queries   int
+
+	// what the cluster collector says, and the node-agent's memory gauge: its containers and when each was last read
+	summary []store.InventoryCluster
+	rows    []store.InventoryObject
+	invErr  error
+	rss     []rssSeries
+}
+
+type rssSeries struct {
+	labels map[string]string
+	last   time.Time
+}
+
+func (f *fakeSource) InventorySummary(_ context.Context, _ string) ([]store.InventoryCluster, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summary, f.invErr
+}
+
+func (f *fakeSource) ListInventory(_ context.Context, q store.InventoryQuery) ([]store.InventoryObject, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.invErr != nil {
+		return nil, f.invErr
+	}
+	want := map[string]bool{}
+	for _, k := range q.Kinds {
+		want[k] = true
+	}
+	var out []store.InventoryObject
+	for _, o := range f.rows {
+		if want[o.Kind] {
+			out = append(out, o)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeSource) ListMetrics(_ context.Context, project string) ([]string, error) {
@@ -46,6 +82,14 @@ func (f *fakeSource) QueryMetric(_ context.Context, q store.MetricQuery) (store.
 	defer f.mu.Unlock()
 	f.queries++
 	res := store.MetricResult{Series: []store.MetricSeries{}, Truncated: f.truncated}
+	if q.Name == RSSMetric {
+		for _, g := range f.rss {
+			if !g.last.Before(q.From) && !g.last.After(q.To) {
+				res.Series = append(res.Series, store.MetricSeries{Labels: g.labels, Points: []store.Point{{T: g.last.UnixMilli(), V: 1}}})
+			}
+		}
+		return res, nil
+	}
 	for _, g := range f.series[q.Project][q.Name] {
 		s := store.MetricSeries{Labels: g.labels}
 		for t := q.From.Unix(); t+int64(q.StepSec) <= q.To.Unix(); t += int64(q.StepSec) {

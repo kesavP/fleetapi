@@ -34,6 +34,11 @@ type Reader interface {
 	ActivitySeries(ctx context.Context, project, target string, from, to time.Time, step int) (ActivityResult, error)
 	SlowQueries(ctx context.Context, f SlowQueryFilter) ([]SlowQueryRow, error)
 	PoolSeries(ctx context.Context, project, target string, from, to time.Time, step int) (PoolsResult, error)
+	// What the cluster collectors report (see inventory): what is in each cluster, how an object changed, and its events.
+	InventorySummary(ctx context.Context, project string) ([]InventoryCluster, error)
+	ListInventory(ctx context.Context, q InventoryQuery) ([]InventoryObject, error)
+	InventoryHistory(ctx context.Context, project, cluster, kind, uid string, limit int) ([]InventoryVersion, error)
+	ListInventoryEvents(ctx context.Context, q InventoryEventQuery) ([]InventoryEvent, error)
 }
 
 type SeriesInfo struct {

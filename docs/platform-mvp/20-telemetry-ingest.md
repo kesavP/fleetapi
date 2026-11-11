@@ -77,6 +77,8 @@ last hour).
 | `GET .../profiles` | services and profile types seen |
 | `GET .../profiles/top` | `service`, `type` (e.g. `cpu:nanoseconds`), `limit`, `format=folded` |
 | `GET .../clickhouse` | none: how the service is connected to ClickHouse and what the project has stored (below) |
+| `POST .../enrollments`, `GET .../enrollments`, `DELETE .../enrollments/{id}` | enrolling a cluster: make a one-time token (manage key), list what has been enrolled (read key), revoke (manage key). A cluster redeems its token with `POST /v1/enroll`, which takes **no API key**. See [24-enrollment.md](24-enrollment.md) |
+| `GET .../inventory`, `.../inventory/{kind}`, `.../inventory/{kind}/{uid}/history`, `.../inventory/events` | what the cluster collectors report: what is IN each cluster, how an object changed, and its events: see [23-cluster-collector.md](23-cluster-collector.md). Ingested with `POST /v1/inventory` (ingest key) |
 | `GET .../databases`, `.../databases/{target}/statements`, `/activity`, `/slow`, `/pools` | what the database collectors report: see [22-database-collector.md](22-database-collector.md). Ingested with `POST /v1/db` and the ingest key |
 
 `rate=true` turns a counter into a per-second rate over `step`-second buckets
@@ -253,6 +255,31 @@ The incident page finds incidents in the browser, while it is open (`telemetry-u
 
 **What it opens.** For each breach, an incident with `source: detected`, `app` the application id, a title such as `shop/web: availability objective burning`, severity `critical` when the burn reached twice the threshold and `warning` otherwise, `started_at` the first minute that was itself burning, and a summary in plain words (how many requests, what share failed or were slow, how fast the budget burned). Two evidence references are attached: the application, and its error logs around the incident. The actor is `detector`.
 
+**Silent applications.** The same detector opens an incident for an application that has **stopped sending data**, found by putting what the
+[cluster collector](23-cluster-collector.md) says a workload is *set to run* beside what the node-agent still sends from it (its memory gauge, one
+series per container). It is the Applications page's "Silent" status, narrowed to what is worth an incident:
+
+| Case | Incident? | Title, severity |
+|---|---|---|
+| Set to run N (N > 0), fewer are ready, and nothing is sending | **yes** | `shop/payment: not ready (0 of 3)`, critical when none is ready, else warning; the summary says why the pods are not ready (`CrashLoopBackOff (OOMKilled) ×3`, `Unschedulable`, ...) |
+| Ready, was sending earlier in the last hour, and nothing is now | **yes** | `shop/ads: ready but sending no data`, warning |
+| Scaled to zero (set to run nothing) | no | a decision, not a failure |
+| Ready and **never** seen sending | no | the node-agent may not cover it; an incident for every such workload would be noise |
+| A cron job | no | idle between runs |
+| Removed from the cluster | no | |
+| Namespaces matching `--detect-silence-exclude` | no | the platform's own, by default (`kube-*`, `gke-*`, `istio-system`, ...) |
+
+Not on every look: an application is opened once it has been silent for `--detect-silence-after` (5 minutes) by the detector's **own** count, from its first
+sight of it, so a rollout, a blip or a restart of the service does not open one; the incident's `started_at` is nevertheless when the application **last sent**,
+when that is known. An application that starts sending again resets the count. Nothing is judged, and nothing opened, when:
+- there is **no inventory**, or the collector has not reported for ten minutes: "stopped sending" cannot then be told from "scaled down", and guessing would open
+  an incident for every scale-down;
+- **nothing at all is sending**: that is the node-agent or the way to the hub, which is not an application's incident (the UI's banner says it once); or
+- the project has no memory gauge.
+
+A silence incident is kept apart from a burn-rate one: an application with one open still gets the other. Each has its own `dedupe_key` (`silence:...` and `detect:...`).
+Like the others, it is never closed by the detector, and one a person resolves while the application is still silent is not opened again at once.
+
 **Not opening twice.** Each look re-reads the last `--detect-lookback` (3 h, at least 1 h 5 min), so the same trouble is seen again and again. A breach is **not** opened when
 - it ended more than `--detect-max-age` (30 min) ago when first seen: that is history, and switching detection on must not open an incident for everything of the last three hours;
 - the detector already has an incident for that application that is **active** (not resolved or closed): a trouble that outlasts the lookback has a start that moves forward on every look, and stays one incident; or
@@ -270,13 +297,15 @@ Creation also carries a `dedupe_key` (application and start). An incident a pers
 | `--detect-availability` | `0.999` | share of requests that should not fail |
 | `--detect-latency` / `--detect-latency-seconds` | `0.999` / `0.5` | share that should be faster than the limit, and the limit |
 | `--detect-burn` | `14.4` | burn rate that declares an incident |
+| `--detect-silence-after` (`silence.after`) | `5m` | how long an application must be silent before an incident is opened; `0` switches silence detection off, else at least `1m` |
+| `--detect-silence-exclude` (`silence.exclude`) | the platform's namespaces | a regular expression for namespaces not judged for silence; empty judges all |
 
 Every project in the projects file is looked at, with the same objectives (the page's per-application objectives are per browser and are not known here). The service must have a read of the metrics and write of incidents: it uses the store directly, so no key is involved.
 
 **Limits.**
 - **One replica**, as for the incident API: "check, then append" is one change at a time inside the process. Two replicas would each open their own incident (the `dedupe_key` makes the same start one, but two replicas can see different starts).
-- **Request metrics only.** Other trouble (a disk filling, a crash loop, a queue) is not detected; that would need rules of a different kind.
-- **A silent application is not a breach.** No requests means no share to judge. An agent that stopped sending is not reported here (the UI's "node-agent is not set up" notice is the signal for that).
+- **Request metrics, and silence.** Other trouble (a disk filling, a queue) is not detected; that would need rules of a different kind. Silence needs the cluster collector.
+- **A burn-rate breach needs requests.** An application that stopped serving has no share to judge: that is what the silence rule above is for. An agent that stopped sending altogether is still not reported here (the UI's "node-agent is not set up" notice is the signal for that).
 - **A quiet minute counts as no data**, and an application with fewer than 20 requests in a window is not judged (`MinRequests`), so a rarely called service cannot page on one failure.
 - **Not stored**: the detector keeps nothing of its own between looks; everything it knows is the metrics and the incident log, so a restart loses nothing.
 
@@ -284,7 +313,7 @@ Every project in the projects file is looked at, with the same objectives (the p
 
 Flags (`--help` lists all): `--listen`, `--grpc-listen`, `--projects-file`,
 `--clickhouse-addr`, `--clickhouse-database`, `--clickhouse-user`,
-`--clickhouse-password-file`, `--clickhouse-tls`, the four `--ttl-*`, `--ttl-databases`, `--storage-policy`, `--cold-volume`, `--cold-after`, `--expose-cluster-info`, `--detect-*` (see above),
+`--clickhouse-password-file`, `--clickhouse-tls`, the four `--ttl-*`, `--ttl-databases`, `--ttl-inventory`, `--storage-policy`, `--cold-volume`, `--cold-after`, `--expose-cluster-info`, `--detect-*` (see above),
 `--batch-rows`, `--max-buffered-rows`, `--flush-interval`, `--max-body-bytes`.
 
 `/healthz` answers as soon as the process runs, so a ClickHouse outage does not
@@ -437,6 +466,9 @@ helm upgrade --install spoke deploy/platform-mvp/chart/spoke --kube-context <spo
 ```
 
 ### Delivering the key
+
+> **Preferred: enroll the cluster from the UI** (Configuration, Clusters): a one-time token and one command, no key copied by hand, a key per cluster that
+> can be revoked. See [24-enrollment.md](24-enrollment.md). What follows is the older way, which still works and uses the project's own ingest key.
 
 `copy-telemetry-credentials.sh <project> [spoke-context] [hub-context]` copies
 `<project>.ingest` from the hub's Secret `telemetry-ingest-keys` into Secret
@@ -711,6 +743,5 @@ use a stub, so they do not prove the map against a real node-agent's data.
 - **Clustered ClickHouse.** Tables are plain `MergeTree` and
   `ReplacingMergeTree`; replicated and distributed variants are not created.
 - **Automatic key delivery.** `copy-telemetry-credentials.sh` is run by hand or
-  from the Makefile. A hub controller that pushes the key to each spoke through
-  the connection the hub already holds (and restarts the agents on rotation)
-  would remove that step; it is not written.
+  from the Makefile, and enrollment ([24-enrollment.md](24-enrollment.md)) replaces it with a command the cluster runs itself. A hub controller that
+  pushes the key to each spoke through the connection the hub already holds (and restarts the agents on rotation) would remove that step; it is not written.

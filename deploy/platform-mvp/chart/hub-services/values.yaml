@@ -136,6 +136,12 @@ telemetryIngest:
     latency: 0.999 # share of requests that should be faster than latencySeconds
     latencySeconds: 0.5
     burn: 14.4 # 14.4 = a 30-day budget gone in two days
+    # Also open an incident for an application that has stopped sending data: one set to run N and with fewer ready, or one that is ready and was
+    # sending and no longer is. NOT one scaled to zero, a cron job, or one that never sent. Needs the cluster collector (the spoke chart's
+    # clusterCollector): without its inventory "stopped sending" cannot be told from "scaled down", and nothing is opened.
+    silence:
+      after: 5m # silent this long before it is opened (0 = off, else at least 1m)
+      exclude: '^(kube-|gke-|gmp-|gatekeeper|config-management|istio-system$|asm-|anthos|cert-manager$|ingress-nginx$|linkerd|calico|tigera|cilium|flux-system$|argocd$|olm$)' # namespaces left out; "" = none
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 512Mi }

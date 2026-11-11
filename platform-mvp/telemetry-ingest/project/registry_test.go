@@ -1,6 +1,7 @@
 package project
 
 import (
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,5 +151,59 @@ func TestProjectsListsEveryProjectOnceInOrder(t *testing.T) {
 	got := r.Projects()
 	if strings.Join(got, ",") != "eu,ops,us" {
 		t.Fatalf("projects = %v", got)
+	}
+}
+
+func TestIssuedIngestKeysAreAcceptedForIngestOnlyAndOnlyForAProjectTheFileLists(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(p, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := sha256.Sum256([]byte("ing_issued-key-for-us-0000000000000000000000000"))
+	gone := sha256.Sum256([]byte("ing_issued-key-for-a-removed-project-00000000000"))
+	if _, ok := r.IngestProject("ing_issued-key-for-us-0000000000000000000000000"); ok {
+		t.Fatal("a key that was not issued is accepted")
+	}
+	in := map[[32]byte]string{issued: "us", gone: "removed"}
+	r.SetIssuedIngest(in)
+	if n, ok := r.IngestProject("ing_issued-key-for-us-0000000000000000000000000"); !ok || n != "us" {
+		t.Fatalf("%q %v", n, ok)
+	}
+	if _, ok := r.ReadProject("ing_issued-key-for-us-0000000000000000000000000"); ok {
+		t.Fatal("an issued ingest key reads")
+	}
+	if _, ok := r.ManageProject("ing_issued-key-for-us-0000000000000000000000000"); ok {
+		t.Fatal("an issued ingest key manages")
+	}
+	if _, ok := r.IngestProject("ing_issued-key-for-a-removed-project-00000000000"); ok {
+		t.Fatal("a key of a project the file does not list is accepted")
+	}
+	// the file's own keys are unaffected, and a copy was taken
+	if n, ok := r.IngestProject("us-ingest-key-0000001"); !ok || n != "us" {
+		t.Fatal("the file's key")
+	}
+	delete(in, issued)
+	if _, ok := r.IngestProject("ing_issued-key-for-us-0000000000000000000000000"); !ok {
+		t.Fatal("the registry kept the caller's map instead of a copy")
+	}
+	// replaced: what is not in the new set is gone (a revoked key)
+	r.SetIssuedIngest(map[[32]byte]string{})
+	if _, ok := r.IngestProject("ing_issued-key-for-us-0000000000000000000000000"); ok {
+		t.Fatal("a key that was dropped is still accepted")
+	}
+	// a project the reload took out of the file takes its issued keys with it
+	r.SetIssuedIngest(map[[32]byte]string{issued: "us"})
+	if err := os.WriteFile(p, []byte(`{"projects":[{"name":"eu","ingestKeys":["eu-ingest-key-0000001"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.IngestProject("ing_issued-key-for-us-0000000000000000000000000"); ok {
+		t.Fatal("an issued key outlived its project")
 	}
 }

@@ -284,6 +284,7 @@ a { color: var(--accent); }
 .chip { display: inline-flex; align-items: center; gap: .4rem; padding: .15rem .6rem .15rem .15rem; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: .85rem; }
 .chip .chip-count { min-width: 1.4rem; padding: 0 .3rem; border-radius: 3px; color: #fff; font-weight: 700; text-align: center; }
 .chip.critical .chip-count { background: #d92d20; }
+.chip.silent .chip-count { background: #7e57c2; }
 .chip.warning .chip-count { background: #e08a00; }
 .chip.logs .chip-count { background: #1e88e5; }
 .chip.nodata .chip-count { background: #7d8794; }
@@ -301,6 +302,7 @@ table.apps .app-cell { border-left: 4px solid var(--line); }
 table.apps .app-cell a { color: var(--accent); text-decoration: none; font-weight: 500; }
 table.apps .app-cell .ns { display: block; font-size: .72rem; }
 table.apps tr.st-critical .app-cell { border-left-color: #d92d20; }
+table.apps tr.st-silent .app-cell { border-left-color: #7e57c2; }
 table.apps tr.st-warning .app-cell { border-left-color: #e08a00; }
 table.apps tr.st-logs .app-cell { border-left-color: #1e88e5; }
 table.apps tr.st-nodata .app-cell { border-left-color: #7d8794; }
@@ -436,3 +438,30 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); cur
 .side .version strong { color: var(--side-text, #d8dee6); font-weight: 600; }
 .side .version small { display: block; font-size: .7rem; opacity: .85; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side.collapsed .version { display: none; }
+
+/* Why an application is silent, under its name: what it is set to run, said as a fact and coloured by how much it needs looking at. */
+table.apps .silence { display: block; font-size: 12px; margin-top: 2px; }
+table.apps .silence.tone-bad { color: var(--bad); }
+table.apps .silence.tone-caution { color: var(--warn); }
+table.apps .silence.tone-info { color: var(--muted, #667085); }
+
+/* Clusters: the command to run, and the table of what is enrolled */
+.clusters .enroll-fields { display: grid; gap: .9rem 1.25rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin-bottom: 1rem; }
+.clusters .enroll-fields label { margin: 0; }
+.clusters .enroll-fields input, .clusters .enroll-fields select { width: 100%; max-width: none; box-sizing: border-box; }
+.clusters label { display: block; font-size: .9rem; }
+.clusters small.bad { display: block; min-height: 1.1em; color: var(--bad); }
+.clusters select { display: block; margin-top: .25rem; padding: .5rem .6rem; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.clusters pre.command { white-space: pre-wrap; word-break: break-all; padding: .75rem; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: .85rem; margin: .5rem 0 1rem; }
+.clusters .issued { border-left: 4px solid var(--accent); }
+.clusters .issued .status { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin: .5rem 0; }
+.clusters .caution { color: var(--warn); }
+.clusters .ok { color: var(--ok); }
+.clusters .bad { color: var(--bad); }
+.clusters form.inline { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; }
+.clusters tr.revoke-row td { background: var(--bg); }
+.status-pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; border: 1px solid var(--line); }
+.status-pill.ok { color: var(--ok); border-color: var(--ok); }
+.status-pill.caution { color: var(--warn); border-color: var(--warn); }
+.status-pill.bad { color: var(--bad); border-color: var(--bad); }
+.status-pill.muted { color: var(--muted); }

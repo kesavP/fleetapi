@@ -19,6 +19,7 @@ export function makeRoutes(session) {
     // The project's settings: its connection, and how its data is stored. "/connection" was the whole page before it had tabs.
     { path: '/configuration', redirect: '/configuration/connection' },
     { path: '/configuration/connection', name: 'connection', component: ConfigurationView, meta: { tab: 'connection' } },
+    { path: '/configuration/clusters', name: 'clusters', component: ConfigurationView, meta: { tab: 'clusters' } },
     { path: '/configuration/clickhouse', name: 'clickhouse', component: ConfigurationView, meta: { tab: 'clickhouse' } },
     { path: '/configuration/incidents', name: 'incident-rules', component: ConfigurationView, meta: { tab: 'incidents' } },
     { path: '/connection', redirect: '/configuration/connection' },

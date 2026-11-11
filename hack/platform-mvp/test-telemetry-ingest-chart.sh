@@ -126,7 +126,13 @@ det="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection
 for want in "--detect-interval=30s" "--detect-burn=6" "--detect-availability=0.99" "--detect-lookback=3h" "--detect-latency=0.999" "--detect-latency-seconds=0.5" "--detect-max-age=30m"; do
   grep -q -- "$want" <<<"$det" || fail "$want missing with detection on"
 done
-echo "ok: no detection flags by default; interval, burn, objectives and lookback pass through when enabled"
+for want in "--detect-silence-after=5m" "--detect-silence-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$det" || fail "$want missing with detection on"
+done
+sil="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.silence.after=0 --set telemetryIngest.detection.silence.exclude=)"
+grep -qF -- "--detect-silence-after=0" <<<"$sil" || fail "silence cannot be switched off"
+grep -qF -- '"--detect-silence-exclude="' <<<"$sil" || fail "an empty exclusion (none) was not passed on: $(grep detect-silence <<<"$sil")"
+echo "ok: no detection flags by default; interval, burn, objectives, lookback and the silence settings pass through when enabled"
 
 echo "== tiered storage: off by default, and a bucket plus a Secret when on"
 off="$(render --set telemetryIngest.enabled=true)"

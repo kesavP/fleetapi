@@ -14,7 +14,7 @@ import (
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/model"
 )
 
-type TTLs struct{ Metrics, Traces, Logs, Profiles, Databases time.Duration }
+type TTLs struct{ Metrics, Traces, Logs, Profiles, Databases, Inventory time.Duration }
 
 type Options struct {
 	Addrs          []string

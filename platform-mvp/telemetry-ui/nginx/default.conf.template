@@ -9,6 +9,16 @@ map $uri $api_target {
     ~^/api/v1/projects/[^/]+/alerts/?$ ${ALERTS_UPSTREAM};
 }
 
+# Which methods a path of the API takes through the UI. Reads (GET, HEAD) everywhere; and, on a project's ENROLLMENTS only, making one (POST) and
+# revoking one (DELETE). Every other write the service has (incidents, for one) stays closed here. $uri is the decoded, normalised path, so
+# "enrollments/../incidents" is the incidents path and gets no writes. What a write needs is a manage key in the X-API-Key header, which the
+# page asks for each time and does not keep.
+map "$request_method $uri" $method_ok {
+    default 0;
+    ~^(GET|HEAD)\s 1;
+    "~^(POST|DELETE)\s/api/v1/projects/[^/]+/enrollments(/[0-9a-f]{12})?$" 1;   # quoted: nginx reads a { in a regex as syntax
+}
+
 server {
     listen 8080;
     server_name _;
@@ -33,10 +43,10 @@ server {
         return 200 "ok\n";
     }
 
-    # The read API, and nothing else of the service. GET only: the UI never writes. The key arrives in the
+    # The read API, and nothing else of the service. GET only, but for enrolling a cluster (see $method_ok above). The key arrives in the
     # X-API-Key header and goes through untouched; it is not in the URL, so the access log never sees it.
     location ^~ /api/v1/projects/ {
-        if ($request_method !~ ^(GET|HEAD)$) {
+        if ($method_ok = 0) {
             return 405;
         }
         include /etc/nginx/snippets/security-headers.conf;

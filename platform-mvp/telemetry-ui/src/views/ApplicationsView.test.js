@@ -24,9 +24,12 @@ const DATA = {
   container_restarts_total: [{ labels: { container_id: CART }, points: flat(0.01) }],
   container_application_type: [{ labels: { container_id: PROM, application_type: 'prometheus' }, points: last(1) }],
 }
-const clientOf = ({ data = DATA, names = Object.keys(data), fail = {}, logs = [] } = {}) => ({
+const clientOf = ({ data = DATA, names = Object.keys(data), fail = {}, logs = [], cluster = null } = {}) => ({
   get: vi.fn(async (path, params) => {
     if (fail[path] || (params && fail[params.name])) throw new Error(fail[path] || fail[params.name])
+    if (path === 'inventory') return cluster ? cluster.summary : []
+    if (path === 'inventory/workloads') return cluster.workloads
+    if (path === 'inventory/pods') return cluster.pods || []
     if (path === 'metrics') return names
     if (path === 'metrics/query_range') return { series: data[params.name] || [] }
     if (path === 'traces/services') return []
@@ -55,7 +58,7 @@ async function mountAt(query = '', props = {}) {
 }
 const names = (w) => w.findAll('tbody tr .app-cell a').map((a) => a.text())
 const chip = (w, key) => w.get(`[data-status=${key}].chip`)
-const counts = (w) => Object.fromEntries(['critical', 'warning', 'logs', 'nodata', 'ok'].map((k) => [k, Number(chip(w, k).get('.chip-count').text())]))
+const counts = (w) => Object.fromEntries(['critical', 'silent', 'warning', 'logs', 'nodata', 'ok'].map((k) => [k, Number(chip(w, k).get('.chip-count').text())]))
 
 describe('ApplicationsView', () => {
   it('lists the applications of the application namespaces, hiding the platform\'s and the monitoring ones until asked for', async () => {
@@ -119,7 +122,7 @@ describe('ApplicationsView', () => {
   it('counts applications per status and narrows to the statuses chosen', async () => {
     const { w } = await mountAt()
     // cartservice restarted (warning); frontend and ledger are fine
-    expect(counts(w)).toEqual({ critical: 0, warning: 1, logs: 0, nodata: 0, ok: 2 })
+    expect(counts(w)).toEqual({ critical: 0, silent: 0, warning: 1, logs: 0, nodata: 0, ok: 2 })
     await chip(w, 'warning').trigger('click')
     expect(names(w)).toEqual(['cartservice'])
     expect(chip(w, 'warning').attributes('aria-pressed')).toBe('true')
@@ -170,12 +173,84 @@ describe('ApplicationsView', () => {
     expect(names(w)[0]).toBe('frontend')
   })
 
-  it('marks an application with pods but none running as critical at once', async () => {
+  it('marks an application that stopped sending as silent, not critical, and says it cannot tell why without an inventory', async () => {
     const gone = { ...DATA, container_resources_memory_rss_bytes: [rss(FE), { labels: { container_id: CART }, points: [{ t: NOW - 600_000, v: 1 }] }] }
     const { w } = await mountAt('', { client: clientOf({ data: gone }) })
     const row = w.findAll('tbody tr').find((r) => r.get('.app-cell a').text() === 'cartservice')
-    expect(row.attributes('data-status')).toBe('critical')
+    expect(row.attributes('data-status')).toBe('silent')
+    expect(row.get('[data-testid=silence]').text()).toBe('Stopped sending')
+    expect(row.get('[data-testid=silence]').attributes('title')).toContain('cluster collector')
     expect(row.findAll('td')[5].text()).toBe('0/1')
+    expect(row.findAll('td')[5].classes()).not.toContain('bad') // zero running is not painted as a failure by itself
+    expect(counts(w)).toMatchObject({ critical: 0, silent: 1 })
+  })
+
+  describe('with the cluster inventory', () => {
+    const iso = (agoMs) => new Date(NOW - agoMs).toISOString()
+    const wl = (ns, name, desired, ready, kind = 'deployment') => ({ cluster: 'gke', kind, uid: `${ns}-${name}`, namespace: ns, name, observed: iso(10_000), data: { desired, ready, available: ready } })
+    const cluster = (workloads, pods = [], agoMs = 20_000) => ({ summary: [{ cluster: 'gke', last_received: iso(agoMs), last_collected: iso(agoMs), counts: {} }], workloads, pods })
+    // the frontend is sending; the cart and the ledger stopped five minutes ago
+    const quiet = { ...DATA, container_resources_memory_rss_bytes: [rss(FE), { labels: { container_id: CART }, points: [{ t: NOW - 600_000, v: 1 }] }, { labels: { container_id: PAY }, points: [{ t: NOW - 600_000, v: 1 }] }] }
+    const row = (w, name) => w.findAll('tbody tr').find((r) => r.get('.app-cell a').text() === name)
+
+    it('says why each silent application is silent, and shows what it is set to run', async () => {
+      const c = cluster([wl('shop', 'frontend', 1, 1), wl('shop', 'cartservice', 0, 0), wl('payments', 'ledger', 3, 0), wl('shop', 'adservice', 2, 2)], [
+        { cluster: 'gke', kind: 'pod', namespace: 'payments', name: 'p1', data: { ready: false, phase: 'Running', workload_kind: 'deployment', workload_name: 'ledger', containers: [{ state: 'waiting', reason: 'CrashLoopBackOff', last_reason: 'OOMKilled' }] } },
+        { cluster: 'gke', kind: 'pod', namespace: 'payments', name: 'p2', data: { ready: false, phase: 'Running', workload_kind: 'deployment', workload_name: 'ledger', containers: [{ state: 'waiting', reason: 'CrashLoopBackOff', last_reason: 'OOMKilled' }] } },
+      ])
+      const { w } = await mountAt('', { client: clientOf({ data: quiet, cluster: c }) })
+      expect(counts(w)).toMatchObject({ critical: 0, silent: 3 })
+
+      expect(row(w, 'frontend').attributes('data-status')).not.toBe('silent')
+      const cart = row(w, 'cartservice')
+      expect(cart.attributes('data-status')).toBe('silent')
+      expect(cart.get('[data-testid=silence]').text()).toBe('Scaled to zero')
+      expect(cart.get('[data-testid=silence]').classes()).toContain('tone-info')
+      expect(cart.findAll('td')[5].text()).toBe('0/0')
+      expect(cart.findAll('td')[5].classes()).not.toContain('bad')
+
+      const ledger = row(w, 'ledger')
+      expect(ledger.get('[data-testid=silence]').text()).toBe('Not ready · 0/3')
+      expect(ledger.get('[data-testid=silence]').classes()).toContain('tone-bad')
+      expect(ledger.get('[data-testid=silence]').attributes('title')).toBe('0 of 3 ready: CrashLoopBackOff (OOMKilled) ×2')
+      expect(ledger.findAll('td')[5].text()).toBe('0/3')
+      expect(ledger.findAll('td')[5].classes()).toContain('bad') // wants three and has none: a failure, said by the cluster
+
+      const ad = row(w, 'adservice') // in the cluster, ready, and never sent a thing
+      expect(ad.get('[data-testid=silence]').text()).toBe('Ready, no data')
+      expect(ad.get('[data-testid=silence]').classes()).toContain('tone-caution')
+    })
+
+    it('lists the silent ones next to the critical ones, worst first, and filters by them', async () => {
+      // the ledger is in neither list of the cluster: it is silent because it was removed
+      const c = cluster([wl('shop', 'frontend', 1, 1), wl('shop', 'cartservice', 0, 0)])
+      const { w } = await mountAt('', { client: clientOf({ data: quiet, cluster: c }) })
+      expect(names(w).slice(0, 2).sort()).toEqual(['cartservice', 'ledger']) // the silent ones before the one that is fine
+      expect(names(w)[2]).toBe('frontend')
+      expect(row(w, 'ledger').get('[data-testid=silence]').text()).toBe('Removed')
+      await chip(w, 'silent').trigger('click')
+      expect(names(w).sort()).toEqual(['cartservice', 'ledger'])
+      expect(w.findAll('tbody tr').every((r) => r.attributes('data-status') === 'silent')).toBe(true)
+    })
+
+    it('does not call anything silent when nothing at all is sending', async () => {
+      const dead = { ...DATA, container_resources_memory_rss_bytes: [FE, CART, PAY].map((c) => ({ labels: { container_id: c }, points: [{ t: NOW - 600_000, v: 1 }] })) }
+      const { w } = await mountAt('', { client: clientOf({ data: dead, cluster: cluster([wl('shop', 'frontend', 1, 1), wl('shop', 'cartservice', 2, 0)]) }) })
+      expect(w.findAll('[data-testid=silence]')).toHaveLength(0)
+      expect(counts(w).silent).toBe(0)
+    })
+
+    it('warns when the cluster collector has gone quiet and says only what the node-agent shows', async () => {
+      const { w } = await mountAt('', { client: clientOf({ data: quiet, cluster: cluster([wl('shop', 'cartservice', 0, 0)], [], 25 * 60_000) }) })
+      expect(w.get('.warn-list').text()).toContain('cluster collector last reported 25 minutes ago')
+      expect(row(w, 'cartservice').get('[data-testid=silence]').text()).toBe('Stopped sending')
+    })
+
+    it('shows a firing critical alert above silence', async () => {
+      const store = { state: reactive({ alerts: [{ service: '/k8s/shop/cartservice', severity: 'critical', status: 'firing' }] }) }
+      const { w } = await mountAt('', { client: clientOf({ data: quiet, cluster: cluster([wl('shop', 'cartservice', 0, 0)]) }), alerts: store })
+      expect(row(w, 'cartservice').attributes('data-status')).toBe('critical')
+    })
   })
 
   it('keeps the choices in the address, and starts from them', async () => {

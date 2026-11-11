@@ -1,0 +1,141 @@
+---
+# Source: spoke/templates/cluster-collector.yaml
+# The cluster collector: one read-only Deployment that reports what is IN this cluster (nodes, namespaces, workloads, pods, volume claims,
+# autoscalers, events) to the hub's telemetry-ingest, beside the node-agent that reports what is HAPPENING on each node. It only pushes: the hub
+# never reaches into the cluster. It authenticates with this cluster's ingest key, in a Secret in this namespace (the node-agent's by default).
+#
+# Its service account may get and list the kinds below and nothing else: NOT Secrets or ConfigMaps (it has no use for them, and what it
+# reports is picked field by field in the collector, never copied), and nothing may be written.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-collector
+  namespace: telemetry-agent
+  labels:
+    app: cluster-collector
+    app.kubernetes.io/part-of: platform-mvp
+
+
+---
+# Source: spoke/templates/cluster-collector.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-cluster-collector
+  labels:
+    app: cluster-collector
+    app.kubernetes.io/part-of: platform-mvp
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces, pods, persistentvolumeclaims, events]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [cronjobs, jobs]
+    verbs: [get, list]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list]
+  # KEDA is optional: where it is not installed this rule matches nothing.
+  - apiGroups: [keda.sh]
+    resources: [scaledobjects]
+    verbs: [get, list]
+
+
+---
+# Source: spoke/templates/cluster-collector.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-cluster-collector
+  labels:
+    app: cluster-collector
+    app.kubernetes.io/part-of: platform-mvp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-cluster-collector
+subjects:
+  - kind: ServiceAccount
+    name: cluster-collector
+    namespace: telemetry-agent
+
+
+---
+# Source: spoke/templates/cluster-collector.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-collector
+  namespace: telemetry-agent
+  labels:
+    app: cluster-collector
+    app.kubernetes.io/part-of: platform-mvp
+spec:
+  # One: two would report the same cluster twice. Recreate, so a rollout never has two for a moment.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cluster-collector
+  template:
+    metadata:
+      labels:
+        app: cluster-collector
+    spec:
+      serviceAccountName: cluster-collector
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cluster-collector
+          image: "us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images/cluster-collector:v1"
+          imagePullPolicy: IfNotPresent
+          args:
+            - --endpoint=http://telemetry-ingest.monitoring.svc.cluster.local
+            - --cluster=gke
+            # the key is read from a mounted file, so it is in neither the pod's spec nor its environment
+            - --api-key-file=/etc/cluster-collector/key/apiKey
+            - --interval=30s
+            - --resync=30m
+            - --events=warning
+          ports:
+            - name: probes
+              containerPort: 8082
+          livenessProbe:
+            httpGet: {path: /healthz, port: probes}
+            periodSeconds: 30
+          # Ready once a look has been reported, and while they keep being. A hub that is down makes it not ready; it does not get it restarted.
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 20m
+              memory: 64Mi
+          volumeMounts:
+            - name: key
+              mountPath: /etc/cluster-collector/key
+              readOnly: true
+      volumes:
+        - name: key
+          secret:
+            secretName: hub-telemetry-credentials
+            items:
+              - key: apiKey
+                path: apiKey
+
+

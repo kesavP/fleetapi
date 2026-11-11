@@ -154,7 +154,7 @@ describe('AlertsView', () => {
       expect(text).toContain('whether or not anyone has this app open')
       expect(text).toContain('2 h before them') // its own baseline, not this tab's
       expect(w.findAll('[data-alert]')).toHaveLength(1)
-      expect(w.get('[data-alert]').text()).toContain('No running instances')
+      expect(w.get('[data-alert]').text()).toContain('Stopped sending data')
       const th = w.get('[data-testid=thresholds-server]').text()
       expect(th).toContain('telemetryAlerts.thresholds')
       expect(th).toContain('12') // errorShare as the service has it

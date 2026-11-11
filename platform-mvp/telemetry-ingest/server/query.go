@@ -56,6 +56,10 @@ func (q *Query) Register(mux *http.ServeMux) {
 	mux.HandleFunc(base+"databases/{target}/activity", q.wrap(q.databaseActivity))
 	mux.HandleFunc(base+"databases/{target}/slow", q.wrap(q.databaseSlow))
 	mux.HandleFunc(base+"databases/{target}/pools", q.wrap(q.databasePools))
+	mux.HandleFunc(base+"inventory", q.wrap(q.inventorySummary))
+	mux.HandleFunc(base+"inventory/events", q.wrap(q.inventoryEvents))
+	mux.HandleFunc(base+"inventory/{kind}", q.wrap(q.inventoryList))
+	mux.HandleFunc(base+"inventory/{kind}/{uid}/history", q.wrap(q.inventoryHistory))
 }
 
 type queryFunc func(ctx context.Context, project string, w http.ResponseWriter, r *http.Request) (any, error)

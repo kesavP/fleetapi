@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { alertLevels, buildApplications, categoryOf, createApplicationsCache, healthItems, loadApplications, namespaceOf, namespacesOf, statusOf } from './applications'
+import { alertLevels, buildApplications, categoryOf, createApplicationsCache, healthItems, loadApplications, namespaceOf, namespacesOf, statusOf, STATUSES } from './applications'
+import { ApiError } from './client.js'
 
 const FE_POD = '/k8s/shop/frontend-5d6f8c7b9-xk2lp'
 const FE = `${FE_POD}/server`
@@ -34,7 +35,9 @@ describe('applications on plain hosts', () => {
 
   it('shows a unit that has stopped on every machine as down', () => {
     expect(find('/system.slice/old.service').instances).toEqual({ running: 0, seen: 1 })
-    expect(statusOf(find('/system.slice/old.service'))).toBe('critical')
+    // not "critical" for having no instance: it is silent, and without an inventory all that can be said is that it stopped
+    expect(statusOf(find('/system.slice/old.service'))).toBe('silent')
+    expect(find('/system.slice/old.service').silence).toMatchObject({ cause: 'stopped' })
   })
 
   it('knows the namespace of a host application id, and keeps "other" for a plain name', () => {
@@ -169,9 +172,19 @@ describe('statusOf / alertLevels', () => {
     expect(statusOf(base, 'warning')).toBe('warning')
     expect(statusOf({ ...base, restarts: 3 }, 'critical')).toBe('critical')
   })
-  it('is critical when it has pods and none are running, without waiting for an alert', () => {
-    expect(statusOf({ ...base, instances: { running: 0, seen: 2 } })).toBe('critical')
+  it('does not judge zero running instances a failure by itself: only a silence found by silence.js is flagged', () => {
+    expect(statusOf({ ...base, instances: { running: 0, seen: 2 } })).toBe('ok')
     expect(statusOf({ ...base, instances: null })).toBe('ok')
+    expect(statusOf({ ...base, silence: { cause: 'scaled-to-zero', tone: 'info', label: 'Scaled to zero', detail: '' } })).toBe('silent')
+  })
+  it('puts silent under a critical alert and over everything else', () => {
+    const silence = { cause: 'stopped', tone: 'caution', label: 'Stopped sending', detail: '' }
+    expect(statusOf({ ...base, silence }, 'critical')).toBe('critical')
+    expect(statusOf({ ...base, silence }, 'warning')).toBe('silent')
+    expect(statusOf({ ...base, silence, restarts: 3, oomKills: 1, uniqueErrors: 5, traffic: { errPct: 50, rps: 1 } })).toBe('silent')
+  })
+  it('lists silent second, after critical, so the worst come first', () => {
+    expect(STATUSES.map((x) => x.key)).toEqual(['critical', 'silent', 'warning', 'logs', 'nodata', 'ok'])
   })
   it('is "no data" when only a name is known', () => {
     expect(statusOf({ ...base, instances: null, hasMetrics: false })).toBe('nodata')
@@ -200,9 +213,13 @@ describe('loadApplications', () => {
     container_resources_cpu_usage_seconds_total: [{ labels: { container_id: FE }, points: flat(0.25) }],
     container_restarts_total: [{ labels: { container_id: CART }, points: flat(0) }],
   }
-  const clientOf = ({ data = DATA, names = Object.keys(DATA), fail = {}, services = ['/k8s/shop/frontend'], logs = [] } = {}) => ({
+  const clientOf = ({ data = DATA, names = Object.keys(DATA), fail = {}, services = ['/k8s/shop/frontend'], logs = [], cluster = null, clusterError = null } = {}) => ({
     get: vi.fn(async (path, params) => {
       if (fail[path] || (params && fail[params.name])) throw new Error(fail[path] || fail[params.name])
+      if (path.startsWith('inventory') && clusterError) throw clusterError
+      if (path === 'inventory') return cluster ? cluster.summary : []
+      if (path === 'inventory/workloads') return cluster.workloads
+      if (path === 'inventory/pods') return cluster.pods || []
       if (path === 'metrics') return names
       if (path === 'metrics/query_range') return { series: data[params.name] || [] }
       if (path === 'traces/services') return services
@@ -222,6 +239,61 @@ describe('loadApplications', () => {
     const asked = client.get.mock.calls.filter(([p]) => p === 'metrics/query_range').map(([, q]) => q.name)
     expect(new Set(asked).size).toBe(asked.length) // each metric once
     expect(r2.hasInventory).toBe(true)
+  })
+
+  describe('with the cluster inventory', () => {
+    // the cart's last reading is five minutes old (not fresh); the frontend is sending
+    const STALE_CART = { ...DATA, container_resources_memory_rss_bytes: [{ labels: { container_id: FE }, points: last(100) }, { labels: { container_id: CART }, points: [{ t: (END - 500) * 1000, v: 50 }] }] }
+    const iso = (agoSeconds) => new Date(END * 1000 - agoSeconds * 1000).toISOString()
+    const wl = (name, desired, ready) => ({ cluster: 'gke', kind: 'deployment', uid: name, namespace: 'shop', name, observed: iso(10), data: { desired, ready, available: ready } })
+    const cluster = (workloads, pods = [], agoSeconds = 20) => ({ summary: [{ cluster: 'gke', last_received: iso(agoSeconds), last_collected: iso(agoSeconds), counts: {} }], workloads, pods })
+
+    it('says why an application is silent, and lists a workload that has no series at all', async () => {
+      const c = cluster([wl('frontend', 1, 1), wl('cartservice', 0, 0), wl('adservice', 1, 1), wl('paymentservice', 2, 0)], [
+        { cluster: 'gke', kind: 'pod', namespace: 'shop', name: 'p', data: { ready: false, phase: 'Running', workload_kind: 'deployment', workload_name: 'paymentservice', containers: [{ state: 'waiting', reason: 'CrashLoopBackOff' }] } },
+      ])
+      const r2 = await loadApplications(clientOf({ data: STALE_CART, cluster: c }), { seconds: 600, now: NOW })
+      const by = Object.fromEntries(r2.apps.map((a) => [a.name, a]))
+      expect(by.frontend.silence).toBeNull()
+      expect(by.cartservice.silence).toMatchObject({ cause: 'scaled-to-zero' })
+      expect(by.adservice.silence).toMatchObject({ cause: 'no-data' }) // no series at all, but the cluster says it is ready
+      expect(by.paymentservice.silence).toMatchObject({ cause: 'not-ready', detail: '0 of 2 ready: CrashLoopBackOff' })
+      expect(by.cartservice.workload).toMatchObject({ desired: 0, ready: 0 })
+      expect(r2.hasCluster).toBe(true)
+      expect(r2.apps.map((a) => statusOf(a))).toEqual(r2.apps.map((a) => (a.silence ? 'silent' : statusOf(a))))
+    })
+
+    it('says an application that is no longer in the cluster was removed, not that it failed', async () => {
+      const r2 = await loadApplications(clientOf({ data: STALE_CART, cluster: cluster([wl('frontend', 1, 1)]) }), { seconds: 600, now: NOW })
+      expect(r2.apps.find((a) => a.name === 'cartservice').silence).toMatchObject({ cause: 'removed', tone: 'info' })
+    })
+
+    it('does not trust a collector that has gone quiet, and says so', async () => {
+      const r2 = await loadApplications(clientOf({ data: STALE_CART, cluster: cluster([wl('frontend', 1, 1), wl('cartservice', 0, 0)], [], 1500) }), { seconds: 600, now: NOW })
+      expect(r2.hasCluster).toBe(false)
+      expect(r2.warnings.some((w) => w.includes('cluster collector last reported 25 minutes ago'))).toBe(true)
+      expect(r2.apps.find((a) => a.name === 'cartservice').silence).toMatchObject({ cause: 'stopped' }) // all that can be said without it
+      expect(r2.apps.map((a) => a.name)).not.toContain('adservice')
+    })
+
+    it('says nothing of silence for any application when none is sending: that is the agent, not the applications', async () => {
+      const allStale = { ...DATA, container_resources_memory_rss_bytes: [{ labels: { container_id: FE }, points: [{ t: (END - 500) * 1000, v: 1 }] }, { labels: { container_id: CART }, points: [{ t: (END - 500) * 1000, v: 1 }] }] }
+      const r2 = await loadApplications(clientOf({ data: allStale, cluster: cluster([wl('frontend', 1, 1), wl('cartservice', 3, 0)]) }), { seconds: 600, now: NOW })
+      expect(r2.apps.every((a) => a.silence === null)).toBe(true)
+    })
+
+    it('works against a hub that does not have the inventory yet, with no warning for it', async () => {
+      const r2 = await loadApplications(clientOf({ data: STALE_CART, clusterError: new ApiError('not found', { status: 404 }) }), { seconds: 600, now: NOW })
+      expect(r2.hasCluster).toBe(false)
+      expect(r2.warnings.some((w) => /inventory|collector/i.test(w))).toBe(false)
+      expect(r2.apps.find((a) => a.name === 'cartservice').silence).toMatchObject({ cause: 'stopped' })
+    })
+
+    it('shows any other failure to read the inventory as a warning, and still shows the applications', async () => {
+      const r2 = await loadApplications(clientOf({ data: STALE_CART, clusterError: new ApiError('the service failed', { status: 500 }) }), { seconds: 600, now: NOW })
+      expect(r2.warnings).toContain('cluster inventory: the service failed')
+      expect(r2.apps.length).toBe(2)
+    })
   })
 
   it('reads the error logs once, for the window', async () => {
@@ -257,6 +329,8 @@ describe('loadApplications', () => {
     const names = [...Object.keys(DATA), 'container_http_requests_total'] // so the call map has a counter to fail on too
     const all = { 'traces/services': 'denied', 'logs/services': 'denied', logs: 'denied', container_http_requests_total: 'denied', ...Object.fromEntries(Object.keys(DATA).map((k) => [k, 'denied'])) }
     await expect(loadApplications(clientOf({ names, fail: all }), { seconds: 600, now: NOW })).rejects.toThrow('denied')
+    // the inventory failing as well changes nothing: it is an extra, not one of the reads that all failing means a bad key
+    await expect(loadApplications(clientOf({ names, fail: all, clusterError: new Error('inventory down') }), { seconds: 600, now: NOW })).rejects.toThrow('denied')
   })
 
   it('warns that the list may be partial when a metric hit the series cap', async () => {
@@ -287,10 +361,17 @@ describe('healthItems', () => {
     expect(items.every((i) => i.status === 'ok')).toBe(true)
   })
 
-  it('judges instances: none running is bad, some missing is a caution', () => {
-    expect(by({ ...base, instances: { running: 0, seen: 2 } }).instances).toMatchObject({ status: 'bad', hint: 'none of 2 running' })
+  it('judges instances: some missing is a caution, and none running is not called bad by itself', () => {
+    expect(by({ ...base, instances: { running: 0, seen: 2 } }).instances).toMatchObject({ status: 'caution', hint: '0 of 2 running' })
     expect(by({ ...base, instances: { running: 1, seen: 2 } }).instances).toMatchObject({ status: 'caution', hint: '1 of 2 running' })
     expect(by({ ...base, instances: null }).instances.status).toBe('unknown')
+  })
+
+  it('takes what the silence says: why an application sends nothing, coloured by how much it needs looking at', () => {
+    const silent = (tone, label, detail) => by({ ...base, silence: { tone, label, detail } }).instances
+    expect(silent('bad', 'Not ready', '0 of 3 ready')).toMatchObject({ status: 'bad', hint: 'Not ready: 0 of 3 ready' })
+    expect(silent('caution', 'Stopped sending', 'x')).toMatchObject({ status: 'caution', hint: 'Stopped sending: x' })
+    expect(silent('info', 'Scaled to zero', 'y')).toMatchObject({ status: 'unknown', hint: 'Scaled to zero: y' })
   })
 
   it('judges CPU and memory against their limits, and says so when there is no limit', () => {
@@ -376,5 +457,45 @@ describe('createApplicationsCache', () => {
     cache.clear()
     await cache.get({}, { ...key(), load })
     expect(load).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('buildApplications with a cluster inventory', () => {
+  const series = (c, fresh = true) => ({ labels: { container_id: c }, value: 1, last: 1, fresh })
+  const FEP = '/k8s/shop/frontend-5d6f8c7b9-xk2lp/app'
+  const OLD = '/k8s/shop/old-5d6f8c7b9-xk2lp/app'
+  const cluster = (entries, reasons = {}) => ({ workloads: new Map(Object.entries(entries)), reasons: new Map(Object.entries(reasons)) })
+  const w = (desired, ready, kind = 'deployment') => ({ kind, desired, ready, available: ready, observed: 1, clusters: 1 })
+
+  it('includes a workload the metrics have never named, and its numbers', () => {
+    const apps = buildApplications({ inventory: [series(FEP)], cluster: cluster({ '/k8s/shop/frontend': w(1, 1), '/k8s/shop/cartservice': w(0, 0) }) })
+    const cart = apps.find((a) => a.name === 'cartservice')
+    expect(cart).toMatchObject({ namespace: 'shop', instances: null, workload: { desired: 0, ready: 0, reasons: [] }, silence: { cause: 'scaled-to-zero' } })
+    expect(apps.find((a) => a.name === 'frontend').silence).toBeNull()
+  })
+
+  it('carries the reasons the pods are not ready', () => {
+    const apps = buildApplications({ inventory: [series(FEP), series('/k8s/shop/pay-5d6f8c7b9-xk2lp/app', false)], cluster: cluster({ '/k8s/shop/pay': w(2, 0) }, { '/k8s/shop/pay': ['ImagePullBackOff ×2'] }) })
+    expect(apps.find((a) => a.name === 'pay')).toMatchObject({ silence: { cause: 'not-ready', detail: '0 of 2 ready: ImagePullBackOff ×2' }, workload: { reasons: ['ImagePullBackOff ×2'] } })
+  })
+
+  it('knows nothing is sending only from the container series: with none, nothing is silent', () => {
+    expect(buildApplications({ inventory: null, cluster: cluster({ '/k8s/shop/cart': w(3, 0) }) })[0].silence).toBeNull()
+    expect(buildApplications({ inventory: [series(FEP, false)], cluster: cluster({ '/k8s/shop/cart': w(3, 0) }) }).every((a) => a.silence === null)).toBe(true)
+  })
+
+  it('tells removed from stopped by whether there is an inventory', () => {
+    const withCluster = buildApplications({ inventory: [series(FEP), series(OLD, false)], cluster: cluster({ '/k8s/shop/frontend': w(1, 1) }) })
+    expect(withCluster.find((a) => a.name === 'old').silence).toMatchObject({ cause: 'removed' })
+    const without = buildApplications({ inventory: [series(FEP), series(OLD, false)] })
+    expect(without.find((a) => a.name === 'old').silence).toMatchObject({ cause: 'stopped' })
+    // a stale collector is no inventory
+    const stale = buildApplications({ inventory: [series(FEP), series(OLD, false)], cluster: { workloads: null, reasons: new Map(), stale: { seconds: 900 } } })
+    expect(stale.find((a) => a.name === 'old').silence).toMatchObject({ cause: 'stopped' })
+  })
+
+  it('never calls a cron job silent', () => {
+    const apps = buildApplications({ inventory: [series(FEP)], cluster: cluster({ '/k8s-cronjob/shop/cleanup': w(0, 0, 'cronjob') }) })
+    expect(apps.find((a) => a.name === 'cleanup').silence).toBeNull()
   })
 })

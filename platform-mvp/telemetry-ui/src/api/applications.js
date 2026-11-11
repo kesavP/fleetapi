@@ -3,13 +3,16 @@ import { instanceOf, workloadForId, workloadOf } from '../map/workload.js'
 import { shape } from '../alerts/report.js'
 import { DNS_METRIC, summarizeDns } from './dns.js'
 import { serviceNames } from './search.js'
+import { loadInventory } from './inventory.js'
+import { silenceOf } from './silence.js'
 import { CPU, CPU_LIMIT, MEM_LIMIT, OOM, RESTARTS, RSS, trafficFor } from './serviceMetrics.js'
 
 // The Applications page: every application (workload) of the project with how it is doing, in one table.
 //
-// There is no inventory in the API, so it is assembled. An application is any workload the node-agent reports a container for
-// (the memory gauge has one series per container, and a pod that stopped keeps its last reading, which is how a workload with no
-// running pod is told from one that never existed), plus any service the traces or logs name and any node of the call map. Its
+// An application is any workload the node-agent reports a container for (the memory gauge has one series per container, and a pod that
+// stopped keeps its last reading, which is how a workload with no running pod is told from one that never existed), plus any workload
+// the cluster collector's inventory lists (so one scaled to zero long ago is still here), any service the traces or logs name and any
+// node of the call map. Its
 // numbers come from the same counters the map and the service page use, read once for ALL applications and grouped by workload,
 // so the page costs about 25 reads however many applications there are.
 
@@ -55,8 +58,12 @@ function typeOf(typeSeries, id, serves) {
  * Applications from what was read. Pure. Every input may be missing (null): the project may lack a metric, or a read may have
  * failed, and an application is then shown with `–` for that, never with a made-up zero.
  */
-export function buildApplications({ inventory = null, cpu = null, cpuLimit = null, memLimit = null, restarts = null, oom = null, appTypes = null, dns = null, graph = null, errorLogs = null, names = [], seconds = 3600 }) {
+export function buildApplications({ inventory = null, cpu = null, cpuLimit = null, memLimit = null, restarts = null, oom = null, appTypes = null, dns = null, graph = null, errorLogs = null, names = [], cluster = null, seconds = 3600 }) {
   const ids = new Set()
+  const workloads = cluster && cluster.workloads ? cluster.workloads : null
+  // Is anything sending? If nothing is, the agent (or the way to the hub) is the problem, and no application is called silent for it.
+  const agentAlive = !!(inventory && inventory.some((s) => s.fresh))
+  for (const id of workloads ? workloads.keys() : []) ids.add(id)
   for (const s of inventory || []) {
     const w = workloadOf(s.labels.container_id)
     if (w) ids.add(w.id)
@@ -92,6 +99,10 @@ export function buildApplications({ inventory = null, cpu = null, cpuLimit = nul
       return s.length ? Math.round(sum(s, (x) => x.rate) * seconds) : null
     }
 
+    const wl = workloads ? workloads.get(id) : null
+    const workload = wl ? { ...wl, reasons: (cluster.reasons && cluster.reasons.get(id)) || [] } : null
+    const instances = pods && pods.size ? { running: running.size, seen: pods.size } : null
+
     const traffic = graph ? trafficFor(graph, id) : null
     const inb = traffic ? traffic.totals.inbound : null
     const out = traffic ? traffic.outbound : []
@@ -99,13 +110,15 @@ export function buildApplications({ inventory = null, cpu = null, cpuLimit = nul
     const unique = new Set(rows.map((l) => shape(l.body)))
 
     apps.push({
+      silence: silenceOf({ instances, workload }, { agentAlive, hasInventory: !!workloads }),
+      workload,
       id,
       name,
       namespace: ns,
       category: categoryOf(ns),
       label: w ? w.label : id,
       type: typeOf(appTypes || [], id, nodeOf.get(id) && nodeOf.get(id).serves),
-      instances: pods && pods.size ? { running: running.size, seen: pods.size } : null,
+      instances,
       cpuCores: cpuS && cpuS.length ? sum(cpuS, (s) => s.rate) : null,
       cpuLimit: lim(cpuLimit),
       memoryBytes: fresh && fresh.length ? sum(fresh, (s) => s.value) : null,
@@ -125,6 +138,7 @@ export function buildApplications({ inventory = null, cpu = null, cpuLimit = nul
 
 export const STATUSES = [
   { key: 'critical', label: 'Critical' },
+  { key: 'silent', label: 'Silent' },
   { key: 'warning', label: 'Warning' },
   { key: 'logs', label: 'Errors in logs' },
   { key: 'nodata', label: 'No data' },
@@ -132,12 +146,14 @@ export const STATUSES = [
 ]
 
 /**
- * How an application is doing, worst first: critical when an alert is firing at that level or it has pods but none are running;
- * warning for a warning alert, a restart or OOM kill in the window, or at least 1% of the calls it answers failing; "errors in logs"
- * when only its logs show errors; "no data" when nothing but a name is known; else ok. `alert` is the worst firing alert's severity.
+ * How an application is doing, worst first: critical when an alert is firing at that level; silent when it has stopped sending data (see
+ * silence.js: whether that was meant is in `app.silence`, and zero running instances is not itself judged a failure); warning for a warning
+ * alert, a restart or OOM kill in the window, or at least 1% of the calls it answers failing; "errors in logs" when only its logs show
+ * errors; "no data" when nothing but a name is known; else ok. `alert` is the worst firing alert's severity.
  */
 export function statusOf(app, alert = null) {
-  if (alert === 'critical' || (app.instances && app.instances.seen > 0 && app.instances.running === 0)) return 'critical'
+  if (alert === 'critical') return 'critical'
+  if (app.silence) return 'silent'
   if (alert === 'warning' || app.restarts > 0 || app.oomKills > 0 || (app.traffic && app.traffic.errPct >= 1)) return 'warning'
   if (app.uniqueErrors > 0) return 'logs'
   if (!app.hasMetrics) return 'nodata'
@@ -184,6 +200,7 @@ export async function loadApplications(client, { seconds, now = () => Date.now()
   add('restarts', RESTARTS, () => rates(client, RESTARTS, start, end))
   add('oom', OOM, () => rates(client, OOM, start, end))
   add('dns', DNS_METRIC, () => rates(client, DNS_METRIC, start, end))
+  add('cluster', null, () => loadInventory(client, { now }))
   add('graph', null, () => loadMap(client, { seconds, now, present }))
   add('names', null, () => serviceNames(client, { seconds, now, strict: true }))
   add('errorLogs', null, async () => {
@@ -200,19 +217,24 @@ export async function loadApplications(client, { seconds, now = () => Date.now()
     const k = keys[i]
     if (r.status !== 'fulfilled') {
       const why = r.reason && r.reason.message ? r.reason.message : 'failed'
-      failures.push(why)
-      warnings.push(`${jobs[k].metric}: ${why}`)
+      // the cluster inventory is an extra: it failing is a warning, and not one of the telemetry reads that all failing means a bad key
+      if (k !== 'cluster') failures.push(why)
+      warnings.push(`${k === 'cluster' ? 'cluster inventory' : jobs[k].metric}: ${why}`)
       return
     }
     if (r.value && r.value.truncated) warnings.push(`${jobs[k].metric} returned more series than one call allows, so some applications may be missing or partial; use a shorter window`)
     got[k] = r.value && r.value.series !== undefined ? r.value.series : r.value
   })
-  if (keys.length && failures.length === keys.length) throw new Error(failures[0])
+  const telemetry = keys.filter((k) => k !== 'cluster').length
+  if (telemetry && failures.length === telemetry) throw new Error(failures[0])
 
   const graph = got.graph || null
   if (graph) warnings.push(...graph.warnings)
-  const apps = buildApplications({ ...got, inventory: got.inventory || null, graph, names: got.names || [], seconds })
-  return { apps, graph, warnings, from: start * 1000, to: end * 1000, hasInventory: !!got.inventory }
+  const cluster = got.cluster || null
+  if (cluster && cluster.stale) warnings.push(`The cluster collector last reported ${Math.max(1, Math.round(cluster.stale.seconds / 60))} minutes ago, so what each workload is set to run is not shown: whether an application that stopped was scaled down cannot be said. Is it running?`)
+  if (cluster && cluster.truncated) warnings.push('The cluster has more workloads than one call returns, so some are missing from this list.')
+  const apps = buildApplications({ ...got, inventory: got.inventory || null, graph, names: got.names || [], cluster, seconds })
+  return { apps, graph, warnings, from: start * 1000, to: end * 1000, hasInventory: !!got.inventory, hasCluster: !!(cluster && cluster.workloads) }
 }
 
 /**
@@ -221,9 +243,12 @@ export async function loadApplications(client, { seconds, now = () => Date.now()
  */
 export function healthItems(app) {
   const ratio = (used, limit) => (used != null && limit ? used / limit : null)
-  const instances = app.instances
-    ? app.instances.running === 0 ? ['bad', `none of ${app.instances.seen} running`] : app.instances.running < app.instances.seen ? ['caution', `${app.instances.running} of ${app.instances.seen} running`] : ['ok', `${app.instances.running} running`]
-    : ['unknown', 'not reported']
+  const tone = { bad: 'bad', caution: 'caution', info: 'unknown' }
+  const instances = app.silence
+    ? [tone[app.silence.tone] || 'caution', `${app.silence.label}: ${app.silence.detail}`]
+    : app.instances
+      ? app.instances.running < app.instances.seen ? ['caution', `${app.instances.running} of ${app.instances.seen} running`] : ['ok', `${app.instances.running} running`]
+      : ['unknown', 'not reported']
   const cpu = ratio(app.cpuCores, app.cpuLimit)
   const mem = ratio(app.memoryBytes, app.memoryLimit)
   const cpuItem = cpu == null ? (app.cpuCores != null ? ['ok', 'no limit set'] : ['unknown', 'not reported']) : cpu >= 1 ? ['bad', 'at its limit'] : cpu >= 0.8 ? ['caution', `${Math.round(cpu * 100)}% of its limit`] : ['ok', `${Math.round(cpu * 100)}% of its limit`]

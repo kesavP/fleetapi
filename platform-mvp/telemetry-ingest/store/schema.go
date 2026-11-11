@@ -277,6 +277,74 @@ PARTITION BY toDate(Time)
 ORDER BY (Project, Target, Database, Time)
 SETTINGS ttl_only_drop_parts = 1`,
 	},
+	{ // 5: cluster inventory (cluster-collector). Objects are kept as versions: a new row whenever one changed, and a row with Deleted = 1 when it
+		// went; what is current is the newest row of each object. Events are rows too (one a change of an event's count), batches one a report.
+		`CREATE TABLE IF NOT EXISTS inventory_objects (
+	Project   LowCardinality(String),
+	Cluster   LowCardinality(String),
+	Kind      LowCardinality(String),
+	UID       String,
+	Namespace LowCardinality(String),
+	Name      String,
+	Version   DateTime64(3, 'UTC') CODEC(Delta, ZSTD(1)),
+	Deleted   UInt8,
+	Created   DateTime64(3, 'UTC'),
+	Labels    Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+	Data      String CODEC(ZSTD(3))
+) ENGINE = MergeTree
+PARTITION BY toDate(Version)
+ORDER BY (Project, Cluster, Kind, UID, Version)
+SETTINGS ttl_only_drop_parts = 1`,
+
+		`CREATE TABLE IF NOT EXISTS inventory_events (
+	Project    LowCardinality(String),
+	Cluster    LowCardinality(String),
+	UID        String,
+	Namespace  LowCardinality(String),
+	ObjectKind LowCardinality(String),
+	ObjectName String,
+	ObjectUID  String,
+	Type       LowCardinality(String),
+	Reason     LowCardinality(String),
+	Message    String CODEC(ZSTD(3)),
+	Count      UInt32,
+	FirstTime  DateTime64(3, 'UTC'),
+	LastTime   DateTime64(3, 'UTC') CODEC(Delta, ZSTD(1)),
+	Source     LowCardinality(String)
+) ENGINE = MergeTree
+PARTITION BY toDate(LastTime)
+ORDER BY (Project, Cluster, LastTime, UID)
+SETTINGS ttl_only_drop_parts = 1`,
+
+		`CREATE TABLE IF NOT EXISTS inventory_batches (
+	Project     LowCardinality(String),
+	Cluster     LowCardinality(String),
+	ReceivedAt  DateTime64(3, 'UTC') CODEC(Delta, ZSTD(1)),
+	CollectedAt DateTime64(3, 'UTC'),
+	Objects     UInt32,
+	Deleted     UInt32,
+	Events      UInt32,
+	Sweeps      UInt32
+) ENGINE = MergeTree
+PARTITION BY toDate(ReceivedAt)
+ORDER BY (Project, Cluster, ReceivedAt)
+SETTINGS ttl_only_drop_parts = 1`,
+	},
+	{ // 6: cluster enrollment (see the enroll package): one-time tokens and the ingest keys they are exchanged for, as an event log. Only hashes of
+		// either are stored. No TTL: it is a record of who was let in, and small.
+		`CREATE TABLE IF NOT EXISTS enrollment_events (
+	Project   LowCardinality(String),
+	ID        String,
+	Time      DateTime64(3, 'UTC'),
+	Type      LowCardinality(String),
+	Actor     String,
+	Cluster   String,
+	TokenHash String,
+	ExpiresAt DateTime64(3, 'UTC'),
+	KeyHash   String
+) ENGINE = MergeTree
+ORDER BY (Project, ID, Time)`,
+	},
 }
 
 // MigrationCount is how many migrations the service knows: what the schema_migrations table holds once they have all been applied.
@@ -307,6 +375,9 @@ var ttlRules = []ttlRule{
 	{"db_pool_samples", "toDateTime(Time)", func(t TTLs) time.Duration { return t.Databases }, false},
 	{"db_pools", "toDateTime(Time)", func(t TTLs) time.Duration { return t.Databases }, false},
 	{"db_pool_stats", "toDateTime(Time)", func(t TTLs) time.Duration { return t.Databases }, false},
+	{"inventory_objects", "toDateTime(Version)", func(t TTLs) time.Duration { return t.Inventory }, false},
+	{"inventory_events", "toDateTime(LastTime)", func(t TTLs) time.Duration { return t.Inventory }, false},
+	{"inventory_batches", "toDateTime(ReceivedAt)", func(t TTLs) time.Duration { return t.Inventory }, false},
 }
 
 // Migrate creates what is missing and applies retention. It is safe to run on

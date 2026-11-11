@@ -79,6 +79,7 @@ VMSG_DIR           ?= platform-mvp/vmset-gateway
 AR_DIR             ?= platform-mvp/alert-router
 TI_DIR             ?= platform-mvp/telemetry-ingest
 DBC_DIR            ?= platform-mvp/db-collector
+CC_DIR             ?= platform-mvp/cluster-collector
 UI_DIR             ?= platform-mvp/telemetry-ui
 
 BC_IMAGE           ?= $(DOCKER_REGISTRY)/binding-controller:$(IMAGE_TAG)
@@ -90,6 +91,7 @@ VMSG_IMAGE         ?= $(DOCKER_REGISTRY)/vmset-gateway:$(IMAGE_TAG)
 AR_IMAGE           ?= $(DOCKER_REGISTRY)/alert-router:$(IMAGE_TAG)
 TI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ingest:$(IMAGE_TAG)
 DBC_IMAGE          ?= $(DOCKER_REGISTRY)/db-collector:$(IMAGE_TAG)
+CC_IMAGE           ?= $(DOCKER_REGISTRY)/cluster-collector:$(IMAGE_TAG)
 UI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ui:$(IMAGE_TAG)
 ALERTS_IMAGE       ?= $(DOCKER_REGISTRY)/telemetry-alerts:$(IMAGE_TAG)
 
@@ -145,7 +147,7 @@ help:
 	@echo "  make verify-all         Full clean-room: clean → deploy → validate → deploy-cd"
 
 # ── Test ─────────────────────────────────────────────────────────────────────
-.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-dbc test-dbc-integration test-dbc-pgbouncer test-dbc-e2e build-db-collector-image push-db-collector test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
+.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-dbc test-dbc-integration test-dbc-pgbouncer test-dbc-e2e build-db-collector-image push-db-collector test-cc test-cc-chart test-cc-e2e test-enroll-e2e build-cluster-collector-image push-cluster-collector test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
 test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti
 	@echo "==> All unit tests passed"
 
@@ -190,6 +192,22 @@ test-dbc-pgbouncer:
 
 test-dbc-e2e:
 	./hack/platform-mvp/test-db-collector-e2e.sh
+
+# The cluster collector (what is in a cluster, reported to the hub): unit tests with the race detector (needs Docker); the spoke chart's
+# template (Docker and network); then against a real Kubernetes API server (k3s), the ingest image and a ClickHouse (Docker, builds images, ~5 min).
+test-cc:
+	./hack/platform-mvp/test-cluster-collector.sh
+
+test-cc-chart:
+	./hack/platform-mvp/test-cluster-collector-chart.sh
+
+test-cc-e2e:
+	./hack/platform-mvp/test-cluster-collector-e2e.sh
+
+# Enrolling a cluster: the command the UI makes, run against a real API server (k3s), then the cluster collector reporting with the key it made
+# (needs Docker, builds two images, ~5 min). See docs/platform-mvp/24-enrollment.md.
+test-enroll-e2e:
+	./hack/platform-mvp/test-enroll-e2e.sh
 
 # Against a real ClickHouse started for the run (needs Docker, ~1 min).
 test-ti-integration:
@@ -402,6 +420,16 @@ build-db-collector-image:
 push-db-collector:
 	$(need-image-name)
 	docker push $(DBC_IMAGE)
+
+# Not part of build-images either: the cluster collector runs in each spoke cluster, beside the node-agent, and has its own image.
+build-cluster-collector-image:
+	$(need-image-name)
+	@echo "==> Building $(CC_IMAGE)"
+	docker build -t $(CC_IMAGE) $(CC_DIR)
+
+push-cluster-collector:
+	$(need-image-name)
+	docker push $(CC_IMAGE)
 
 # Not part of build-images: the UI and the alert service are opt-in, like the service they read.
 # An empty DOCKER_REGISTRY or IMAGE_TAG (an unset shell variable passed on the command line, as in DOCKER_REGISTRY=$REG) would

@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/inventory"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/store"
 )
 
@@ -21,6 +23,9 @@ const Actor = "detector"
 type Source interface {
 	ListMetrics(ctx context.Context, project string) ([]string, error)
 	QueryMetric(ctx context.Context, q store.MetricQuery) (store.MetricResult, error)
+	// What the cluster collector says is in the cluster, which silence detection needs: without it, "stopped sending" cannot be told from "scaled down".
+	InventorySummary(ctx context.Context, project string) ([]store.InventoryCluster, error)
+	ListInventory(ctx context.Context, q store.InventoryQuery) ([]store.InventoryObject, error)
 }
 
 // Incidents is what the Runner opens incidents with: the incident manager.
@@ -49,6 +54,13 @@ type Runner struct {
 	MaxSeries int
 	MaxPoints int
 	Now       func() time.Time
+
+	// SilenceAfter: an application that has stopped sending (see silence.go) is opened as an incident once it has been silent this long by this
+	// runner's own count. Zero switches silence detection off. SilenceExclude, when set, names the namespaces to leave out.
+	SilenceAfter   time.Duration
+	SilenceExclude *regexp.Regexp
+
+	silentSince map[string]time.Time // project|application -> when this runner first saw it silent
 }
 
 // Validate says what is wrong with the settings, or nil.
@@ -63,6 +75,8 @@ func (r *Runner) Validate() error {
 		return fmt.Errorf("the step must be positive")
 	case r.Lookback < time.Duration(r.Config.LongSeconds+r.Config.ShortSeconds)*time.Second:
 		return fmt.Errorf("the lookback must cover the long and the short window (%ds), or the long window never fills", r.Config.LongSeconds+r.Config.ShortSeconds)
+	case r.SilenceAfter < 0 || (r.SilenceAfter > 0 && r.SilenceAfter < time.Minute):
+		return fmt.Errorf("the silence delay must be zero (off) or at least a minute")
 	case r.MaxSeries <= 0 || r.MaxPoints <= 0:
 		return fmt.Errorf("the series and point limits must be positive")
 	}
@@ -108,7 +122,8 @@ func (r *Runner) now() time.Time {
 	return time.Now()
 }
 
-// Project looks at one project and returns how many incidents it opened.
+// Project looks at one project and returns how many incidents it opened: for applications burning their error budget, and for those that
+// have stopped sending. One failing does not stop the other.
 func (r *Runner) Project(ctx context.Context, project string) (int, error) {
 	names, err := r.Source.ListMetrics(ctx, project)
 	if err != nil {
@@ -118,10 +133,19 @@ func (r *Runner) Project(ctx context.Context, project string) (int, error) {
 	for _, n := range names {
 		has[n] = true
 	}
+	opened, berr := r.burning(ctx, project, has)
+	n, serr := r.silent(ctx, project, has)
+	opened += n
+	if berr != nil {
+		return opened, berr
+	}
+	return opened, serr
+}
+
+func (r *Runner) burning(ctx context.Context, project string, has map[string]bool) (int, error) {
 	if !has[RequestsMetric] { // no inbound HTTP counted: nothing to judge (the UI says so as "no agent")
 		return 0, nil
 	}
-
 	step := int64(r.Step)
 	end := r.now().Unix() / step * step
 	start := end - int64(r.Lookback/time.Second)
@@ -177,6 +201,146 @@ func (r *Runner) Project(ctx context.Context, project string) (int, error) {
 	return opened, nil
 }
 
+// forget drops what is remembered of when applications of a project were first seen silent, but for those in keep.
+func (r *Runner) forget(project string, keep map[string]bool) {
+	for k := range r.silentSince {
+		if strings.HasPrefix(k, project+"|") && !keep[k] {
+			delete(r.silentSince, k)
+		}
+	}
+}
+
+// silent opens incidents for the applications that have stopped sending: not for the first look that sees one (a rollout, a restart, a blip),
+// but when it has been so for SilenceAfter, counted from this runner's first sight of it (so a restart of the service starts the count again).
+func (r *Runner) silent(ctx context.Context, project string, has map[string]bool) (int, error) {
+	if r.SilenceAfter <= 0 || !has[RSSMetric] {
+		return 0, nil
+	}
+	if r.silentSince == nil {
+		r.silentSince = map[string]time.Time{}
+	}
+	now := r.now().UTC()
+
+	// Is there an inventory to judge by, and is it current?
+	clusters, err := r.Source.InventorySummary(ctx, project)
+	if err != nil {
+		return 0, fmt.Errorf("reading the inventory summary: %w", err)
+	}
+	fresh := map[string]bool{}
+	for _, c := range clusters {
+		if now.Sub(c.LastReceived) <= staleInventory {
+			fresh[c.Cluster] = true
+		}
+	}
+	if len(fresh) == 0 {
+		r.forget(project, nil)
+		return 0, nil
+	}
+	rows, err := r.Source.ListInventory(ctx, store.InventoryQuery{Project: project, Kinds: inventory.Workloads, Limit: 1000})
+	if err != nil {
+		return 0, fmt.Errorf("reading the inventory: %w", err)
+	}
+	var current []store.InventoryObject
+	for _, o := range rows {
+		if fresh[o.Cluster] {
+			current = append(current, o)
+		}
+	}
+
+	step := int64(r.Step)
+	end := time.Unix(now.Unix()/step*step, 0).UTC()
+	res, err := r.Source.QueryMetric(ctx, store.MetricQuery{
+		Project: project, Name: RSSMetric, From: end.Add(-silenceWindow), To: end, StepSec: r.Step, MaxSeries: r.MaxSeries, MaxPoints: r.MaxPoints,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("reading the memory gauge: %w", err)
+	}
+	if res.Truncated {
+		r.Log.Warn("the memory gauge hit the series or point limit, so some applications are not judged for silence", "project", project)
+	}
+	tel := TelemetryOf(res.Series, end)
+	if !AgentAlive(tel) { // nothing is sending: the agent, not the applications
+		r.forget(project, nil)
+		return 0, nil
+	}
+
+	silent := JudgeSilence(WantedFrom(current), tel, r.SilenceExclude)
+	keep := map[string]bool{}
+	var due []Silent
+	since := map[string]time.Time{}
+	for _, s := range silent {
+		k := project + "|" + s.App
+		keep[k] = true
+		first, ok := r.silentSince[k]
+		if !ok {
+			first = now
+			r.silentSince[k] = first
+		}
+		if now.Sub(first) < r.SilenceAfter {
+			continue
+		}
+		due = append(due, s)
+		// it began when it last sent, when that is known and is not later than this runner's first sight of it
+		since[s.App] = first
+		if !s.LastData.IsZero() && s.LastData.Before(first) {
+			since[s.App] = s.LastData
+		}
+	}
+	r.forget(project, keep)
+	if len(due) == 0 {
+		return 0, nil
+	}
+
+	// why the pods that are not ready are not: read only when something is
+	for _, s := range due {
+		if s.Cause != CauseNotReady {
+			continue
+		}
+		pods, err := r.Source.ListInventory(ctx, store.InventoryQuery{Project: project, Kinds: []string{inventory.Pod}, Limit: 1000})
+		if err != nil {
+			r.Log.Warn("reading the pods of the inventory failed, so the incidents will not say why they are not ready", "project", project, "error", err)
+			break
+		}
+		var mine []store.InventoryObject
+		for _, o := range pods {
+			if fresh[o.Cluster] {
+				mine = append(mine, o)
+			}
+		}
+		reasons := PodReasons(mine)
+		for i := range due {
+			due[i].Reasons = reasons[due[i].App]
+		}
+		break
+	}
+
+	var found []Found
+	byApp := map[string]Silent{}
+	for _, s := range due {
+		byApp[s.App] = s
+		found = append(found, Found{App: s.App, Label: s.Label, Family: familySilence, Breach: Breach{Start: since[s.App], End: now, Open: true}})
+	}
+	existing, _, err := r.Incidents.List(ctx, project, incident.Filter{})
+	if err != nil {
+		return 0, fmt.Errorf("listing incidents: %w", err)
+	}
+	opened := 0
+	for _, f := range Fresh(found, existing, now, r.Config, r.MaxAge) {
+		s := byApp[f.App]
+		inc, created, err := r.Incidents.Create(ctx, project, Actor, DescribeSilence(s, f.Start, now))
+		if err != nil {
+			r.Log.Error("opening an incident failed", "project", project, "app", f.App, "error", err)
+			continue
+		}
+		if !created {
+			continue
+		}
+		opened++
+		r.attach(ctx, project, inc.ID, f)
+	}
+	return opened, nil
+}
+
 // attach points a new incident at where to look. A failure is logged only: the incident is already open without it.
 func (r *Runner) attach(ctx context.Context, project, id string, f Found) {
 	from := f.Start.Add(-5 * time.Minute)
@@ -194,9 +358,25 @@ func (r *Runner) attach(ctx context.Context, project, id string, f Found) {
 	}
 }
 
-// Found is a breach of one application.
+// The kinds of incident the detector opens. They are kept apart when deciding whether an application already has one: a silent application
+// with an incident open must still get one when it starts burning its error budget, and the other way round.
+const (
+	familyBurn    = ""
+	familySilence = "silence"
+)
+
+// familyOf is which kind of incident the detector opened an incident as, from its dedupe key.
+func familyOf(i incident.Incident) string {
+	if strings.HasPrefix(i.DedupeKey, "silence:") {
+		return familySilence
+	}
+	return familyBurn
+}
+
+// Found is a breach, or a silence, of one application.
 type Found struct {
 	App, Label string
+	Family     string // familyBurn or familySilence
 	Breach
 }
 
@@ -229,7 +409,7 @@ func Fresh(found []Found, existing []incident.Incident, now time.Time, c Config,
 		}
 		covered := false
 		for _, e := range existing {
-			if e.Source != incident.Detected || e.App != f.App {
+			if e.Source != incident.Detected || e.App != f.App || familyOf(e) != f.Family {
 				continue
 			}
 			if e.StartedAt.After(f.End.Add(join)) {

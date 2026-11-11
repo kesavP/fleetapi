@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -109,5 +110,31 @@ func TestIncidentDetectionIsOffUnlessAskedFor(t *testing.T) {
 	}
 	if c.DetectInterval.Minutes() != 1 || c.DetectBurn != 6 || c.DetectAvailability != 0.99 {
 		t.Fatalf("config = %+v", c)
+	}
+}
+
+func TestSilenceDetectionSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DetectSilenceAfter != 5*time.Minute || c.DetectSilenceExclude != DefaultSilenceExclude {
+		t.Fatalf("defaults = %v %q", c.DetectSilenceAfter, c.DetectSilenceExclude)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--detect-silence-after", "0", "--detect-silence-exclude", ""})
+	if err != nil || c.DetectSilenceAfter != 0 || c.DetectSilenceExclude != "" {
+		t.Fatalf("off and no exclusion: %v %+v", err, c)
+	}
+	for name, args := range map[string][]string{
+		"a delay under a minute": {"--detect-silence-after", "30s"},
+		"a negative delay":       {"--detect-silence-after", "-5m"},
+		"a bad expression":       {"--detect-silence-exclude", "(unclosed"},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if !regexp.MustCompile(DefaultSilenceExclude).MatchString("kube-system") || regexp.MustCompile(DefaultSilenceExclude).MatchString("shop") || regexp.MustCompile(DefaultSilenceExclude).MatchString("monitoring") {
+		t.Fatal("the default leaves out the platform's namespaces, not the applications' or the monitoring ones")
 	}
 }

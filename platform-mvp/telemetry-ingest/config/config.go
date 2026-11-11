@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -40,6 +41,9 @@ type Config struct {
 	TTLProfiles time.Duration
 	// TTLDatabases is how long what the database collectors report is kept: statement statistics, session samples, slow statements.
 	TTLDatabases time.Duration
+	// TTLInventory is how long a cluster's inventory is kept: the versions of its objects, its events and its reports. An object that has not
+	// been reported (changed or resynced) for this long is gone from the history too.
+	TTLInventory time.Duration
 
 	// Incident detection: every DetectInterval each project's inbound request metrics are judged against an availability and a latency
 	// objective, and an incident is opened for an application that burns its error budget DetectBurn times faster than allowed. Zero
@@ -51,6 +55,10 @@ type Config struct {
 	DetectLatency        float64
 	DetectLatencySeconds float64
 	DetectBurn           float64
+	// DetectSilenceAfter: an application that has stopped sending data (needs the cluster collector's inventory) is opened as an incident once it
+	// has been silent this long. Zero switches it off. DetectSilenceExclude is a regular expression for the namespaces to leave out ("" = none).
+	DetectSilenceAfter   time.Duration
+	DetectSilenceExclude string
 
 	BatchRows     int
 	MaxBuffered   int
@@ -58,6 +66,9 @@ type Config struct {
 	MaxBodyBytes  int64
 	ReloadEvery   time.Duration
 }
+
+// DefaultSilenceExclude is the platform's own namespaces: the ones the Applications page hides until asked for.
+const DefaultSilenceExclude = `^(kube-|gke-|gmp-|gatekeeper|config-management|istio-system$|asm-|anthos|cert-manager$|ingress-nginx$|linkerd|calico|tigera|cilium|flux-system$|argocd$|olm$)`
 
 func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("telemetry-ingest", flag.ContinueOnError)
@@ -83,6 +94,7 @@ func Parse(args []string) (Config, error) {
 	fs.DurationVar(&c.TTLLogs, "ttl-logs", 7*24*time.Hour, "Log retention")
 	fs.DurationVar(&c.TTLProfiles, "ttl-profiles", 7*24*time.Hour, "Profile retention")
 	fs.DurationVar(&c.TTLDatabases, "ttl-databases", 7*24*time.Hour, "Retention of what database collectors report")
+	fs.DurationVar(&c.TTLInventory, "ttl-inventory", 14*24*time.Hour, "Retention of what cluster collectors report (inventory versions, events, reports)")
 	fs.IntVar(&c.BatchRows, "batch-rows", 10000, "Rows per ClickHouse insert")
 	fs.IntVar(&c.MaxBuffered, "max-buffered-rows", 200000, "Rows buffered per signal before ingest answers 503")
 	fs.DurationVar(&c.FlushInterval, "flush-interval", 5*time.Second, "Longest a row waits before it is inserted")
@@ -93,6 +105,8 @@ func Parse(args []string) (Config, error) {
 	fs.Float64Var(&c.DetectAvailability, "detect-availability", 0.999, "Share of requests that should not fail")
 	fs.Float64Var(&c.DetectLatency, "detect-latency", 0.999, "Share of requests that should be faster than detect-latency-seconds")
 	fs.Float64Var(&c.DetectLatencySeconds, "detect-latency-seconds", 0.5, "A request slower than this counts against the latency objective")
+	fs.DurationVar(&c.DetectSilenceAfter, "detect-silence-after", 5*time.Minute, "Open an incident for an application that has stopped sending data once it has been silent this long (0 = off; needs the cluster collector)")
+	fs.StringVar(&c.DetectSilenceExclude, "detect-silence-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose applications are not judged for silence; empty = none")
 	fs.Float64Var(&c.DetectBurn, "detect-burn", 14.4, "Burn rate at which an incident is declared (14.4 = a 30-day budget gone in two days)")
 	fs.DurationVar(&c.ReloadEvery, "reload-interval", 10*time.Second, "How often the projects file is re-read")
 	if err := fs.Parse(args); err != nil {
@@ -119,7 +133,7 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("clickhouse-addr must list at least one address")
 	case !identifier(c.ClickHouseDatabase):
 		return Config{}, fmt.Errorf("clickhouse-database %q must be letters, digits and underscores", c.ClickHouseDatabase)
-	case c.TTLMetrics < time.Hour, c.TTLTraces < time.Hour, c.TTLLogs < time.Hour, c.TTLProfiles < time.Hour, c.TTLDatabases < time.Hour:
+	case c.TTLMetrics < time.Hour, c.TTLTraces < time.Hour, c.TTLLogs < time.Hour, c.TTLProfiles < time.Hour, c.TTLDatabases < time.Hour, c.TTLInventory < time.Hour:
 		return Config{}, fmt.Errorf("every ttl must be at least 1h")
 	case c.StoragePolicy != "" && !identifier(c.StoragePolicy):
 		return Config{}, fmt.Errorf("storage-policy %q must be letters, digits and underscores", c.StoragePolicy)
@@ -137,6 +151,10 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("batch-rows must be at least 1")
 	case c.MaxBuffered < c.BatchRows:
 		return Config{}, fmt.Errorf("max-buffered-rows must be at least batch-rows")
+	case c.DetectSilenceAfter < 0 || (c.DetectSilenceAfter > 0 && c.DetectSilenceAfter < time.Minute):
+		return Config{}, fmt.Errorf("detect-silence-after must be 0 (off) or at least 1m")
+	case c.DetectSilenceExclude != "" && !validRegexp(c.DetectSilenceExclude):
+		return Config{}, fmt.Errorf("detect-silence-exclude is not a valid regular expression")
 	case c.FlushInterval <= 0, c.ReloadEvery <= 0:
 		return Config{}, fmt.Errorf("flush-interval and reload-interval must be positive")
 	case c.MaxBodyBytes < 1<<10:
@@ -156,4 +174,9 @@ func identifier(s string) bool {
 		}
 	}
 	return true
+}
+
+func validRegexp(s string) bool {
+	_, err := regexp.Compile(s)
+	return err == nil
 }

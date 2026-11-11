@@ -64,7 +64,7 @@ describe('no-instances', () => {
     const recent = look([edge(B, C, { rps: 5 })], { listeners: listening([A, B, C], [B, C]) })
     const r = evaluate({ recent, baseline: NORMAL })
     expect(rules(r)).toEqual([`no-instances|${A}`])
-    expect(r.alerts[0].severity).toBe('critical')
+    expect(r.alerts[0].severity).toBe('warning') // silence is not itself a failure: it may have been scaled down
     expect(r.alerts[0].evidence.lastTrafficPerSec).toBe(10)
   })
 

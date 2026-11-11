@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/config"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
@@ -102,9 +104,40 @@ func main() {
 	pipe.Store(p)
 
 	mux := http.NewServeMux()
-	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count, Databases: s}).Register(mux)
+	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count, Databases: s, Inventory: s}).Register(mux)
 	(&server.Query{Projects: reg, Reader: s, Log: log, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 200000, ShareClusterInfo: cfg.ExposeClusterInfo}).Register(mux)
 	// Incident lifecycle: read with a read or manage key, change with a manage key (see server/incidents.go). One replica only: see incident.Manager.
+	// Cluster enrollment: one-time tokens made with a manage key, redeemed by a cluster for an ingest key of its own. The keys it issues are kept
+	// as hashes in ClickHouse and taken up by the registry at once and, so that a revoke or a restart is picked up, every few seconds.
+	enrollments := enroll.NewManager(s.Enrollments())
+	issueKeys := func() {
+		keys, err := enrollments.Keys(ctx)
+		if err != nil {
+			log.Error("reading the issued ingest keys failed; keeping the previous ones", "error", err)
+			return
+		}
+		m := make(map[[32]byte]string, len(keys))
+		for _, k := range keys {
+			m[k.Hash] = k.Project
+		}
+		reg.SetIssuedIngest(m)
+	}
+	enrollments.OnKeys = issueKeys
+	issueKeys()
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				issueKeys()
+			}
+		}
+	}()
+	(&server.Enroll{Projects: reg, Manager: enrollments, Log: log, Count: count}).Register(mux)
+
 	incidents := incident.NewManager(s.Incidents(), log)
 	(&server.Incidents{Projects: reg, Manager: incidents, Log: log}).Register(mux)
 	if cfg.DetectInterval > 0 {
@@ -113,6 +146,10 @@ func main() {
 		r := &detect.Runner{
 			Projects: reg.Projects, Source: s, Incidents: incidents, Config: dc, Log: log,
 			Interval: cfg.DetectInterval, Lookback: cfg.DetectLookback, MaxAge: cfg.DetectMaxAge, Step: 60, MaxSeries: 5000, MaxPoints: 1000000,
+		}
+		r.SilenceAfter = cfg.DetectSilenceAfter
+		if cfg.DetectSilenceExclude != "" {
+			r.SilenceExclude = regexp.MustCompile(cfg.DetectSilenceExclude) // checked by config.Parse
 		}
 		if err := r.Validate(); err != nil {
 			log.Error("invalid incident detection settings", "error", err)
@@ -157,7 +194,7 @@ func openStore(ctx context.Context, cfg config.Config, log *slog.Logger) *store.
 		s, err := store.Open(ctx, store.Options{
 			Addrs: cfg.ClickHouseAddrs, Database: cfg.ClickHouseDatabase, User: cfg.ClickHouseUser,
 			Password: cfg.ClickHousePassword, TLS: cfg.ClickHouseTLS, CreateDatabase: cfg.ClickHouseCreateDatabase,
-			TTL:  store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles, Databases: cfg.TTLDatabases},
+			TTL:  store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles, Databases: cfg.TTLDatabases, Inventory: cfg.TTLInventory},
 			Tier: store.Tiering{Policy: cfg.StoragePolicy, Volume: cfg.ColdVolume, After: cfg.ColdAfter},
 		})
 		if err == nil {

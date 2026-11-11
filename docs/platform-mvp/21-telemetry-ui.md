@@ -24,17 +24,27 @@ connection and to the connection page when there is not, and connecting opens th
   `istio-system`, ...) and **monitoring** (`monitoring`, `prometheus*`, `telemetry*`, ...). The drop-down offers only the namespaces
   of the kinds that are on. Search matches an application or namespace name.
 - **Status chips** count the applications by how they are doing and narrow the table when pressed: **Critical** (an alert firing at
-  that level, or it has pods and none is running), **Warning** (a warning alert, a restart or OOM kill in the window, or at least 1% of
-  the calls it answers failing), **Errors in logs** (only its logs show errors), **No data** (only a name is known) and **OK**. The
-  coloured bar on each row is the same status. A firing alert changes an application's status on the page without a reload.
+  that level), **Silent** (it has stopped sending data: see below), **Warning** (a warning alert, a restart or OOM kill in the window, or
+  at least 1% of the calls it answers failing), **Errors in logs** (only its logs show errors), **No data** (only a name is known) and
+  **OK**. The coloured bar on each row is the same status. A firing alert changes an application's status on the page without a reload.
+  Zero running instances is **not** judged a failure by itself: a workload scaled down on purpose looks the same.
+- **Silent, and why.** An application that sent data earlier in the window (or that the cluster lists) and sends none now, while other
+  applications still do, is Silent, with its reason under its name. With the [cluster collector](23-cluster-collector.md) the reason is
+  known: **Scaled to zero** (it is set to run no replicas: not a failure), **Not ready · 0/3** (it is set to run three and has none: the
+  pods' reasons, such as `CrashLoopBackOff (OOMKilled)`, are in the tooltip), **Ready, no data** (it is ready and nothing arrives from it:
+  is the node-agent on its nodes?) and **Removed** (it is no longer in the cluster). Without the collector, or when it has not reported for
+  ten minutes (a warning says so), all that can be said is **Stopped sending**. Cron jobs are never Silent: idle between runs is normal.
+  When **nothing at all** is sending, no application is called Silent: that is the node-agent or the way to the hub, and the notice at the
+  top of the page says it once.
 - **Columns:** type (from the node-agent, else the protocol it serves), traffic in (calls a second), errors (share of those calls
-  failing), upstreams (calls out that are healthy over all), instances (pods running over pods seen in the window), restarts in the
-  window, CPU (mean cores), memory, and unique errors in its logs (a link to them).
+  failing), upstreams (calls out that are healthy over all), instances (**ready over set to run** from the cluster when the collector
+  reports, else pods running over pods seen), restarts in the window, CPU (mean cores), memory, and unique errors in its logs (a link
+  to them).
 - The time range is at the top right. The choices are in the address, so a view can be shared.
 
-**Where the list comes from.** The API has no inventory, so it is assembled, and the node-agent's own metrics are the source, so an
-application that stopped sending traces still appears (as down, not as missing): every workload with a container in the memory gauge,
-plus any service the traces or logs name and any node of the call map. Pods that stopped reporting keep their last reading, which is
+**Where the list comes from.** The node-agent's own metrics are the source, so an application that stopped sending traces still appears
+(as silent, not as missing): every workload with a container in the memory gauge, every workload the cluster collector's inventory lists
+(so one scaled to zero long ago is still here), plus any service the traces or logs name and any node of the call map. Pods that stopped reporting keep their last reading, which is
 how "0 of 1 running" is told from "never existed". Instances are pods, not containers, so a sidecar is not a second instance. Each
 metric is read once for all applications, about 25 reads per load however many applications there are.
 
@@ -59,7 +69,7 @@ make ui-dev UI_API=http://host.docker.internal:8090      # then connect to proje
 | Serving | nginx (unprivileged) image, own Deployment | One artefact, no Node at runtime, read-only root filesystem |
 | Reaching the API | Same-origin `/api` proxy in nginx | No CORS; the service's address is not in the browser; the proxy can be narrowed |
 | Auth | The user's read key, in `sessionStorage`, in a header | Matches the per-project keys; nothing stored server-side; gone with the tab |
-| Exposure | Proxy allows GET/HEAD on `/api/v1/projects/` only | Exposing the UI must not expose ingestion (`/v1/*` is 404) |
+| Exposure | Proxy allows GET/HEAD on `/api/v1/projects/`, and POST/DELETE on a project's `enrollments` only | Exposing the UI must not expose ingestion (`/v1/*` is 404, so `/v1/enroll` is not reachable through it either) nor any other write |
 | Coroot code | None copied | Different API and product; a `NOTICE` is required if that changes |
 
 ## Deploy
@@ -152,7 +162,7 @@ map's counters).
 | Stopped receiving traffic | a service that had at least 0.1 calls+connections/s now gets under 5% of that | critical at zero, else warning |
 | Connections failing | at least 20% of connection attempts into it fail, and at least 5 failed in the window | critical at 90% |
 | Calls failing | at least 5% of the calls it answers fail (5xx, gRPC server errors), over at least 20 calls | critical at 50% |
-| No running instances | it was listening in the baseline or recent window and no instance reports a listen address now (suppresses the no-traffic alert that follows from it) | critical |
+| Stopped sending data (`no-instances`) | it was listening in the baseline or recent window and no instance reports a listen address now. A **warning**: it may have been scaled down on purpose (suppresses the no-traffic alert that follows from it) | warning |
 | No telemetry | all calls disappeared at once: the agents or ingest, not every service (replaces the per-service absence alerts) | critical |
 
 In browser mode the thresholds are editable on the page (kept per tab) and reset to the defaults with one click; with the alert service
@@ -328,6 +338,8 @@ The **Project** entry at the foot of the menu opens **Configuration**, which has
 The ClickHouse tab follows Coroot's ClickHouse settings page, but is **read-only**: the protocol (Native), database and TLS are shown disabled, and the address and credentials read `<hidden>`. There is no "Test & Save" because the connection is set when the telemetry service is deployed, and a browser with a read key must not be able to change it. Instead the tab shows a status line (version, answer time) and a **Test connection** button, which asks the service again.
 
 Below it, **Storage Usage** lists, for each kind of data, this project's size (an estimate from its share of the table's rows), rows, compression ratio, TTL and how long ago its oldest data is. **Cluster Topology** lists the server's disks with free and total space and a usage bar (green, amber from 75%, red from 90%). Both the platform-wide columns and the disks need `telemetryIngest.exposeClusterInfo=true`; without it the tab says the operator has not shared them. The endpoint is described in [20-telemetry-ingest.md](20-telemetry-ingest.md#clickhouse-information).
+
+**Clusters** (`/configuration/clusters`) enrolls a cluster without anyone copying a key, and lists what has been enrolled (cluster, status, who made it and when, with **Revoke** / **Cut off its key**). **Add a cluster** takes a cluster name, the hub address *as that cluster reaches it* (remembered in this browser), how long the token lasts (15 minutes, 1 hour or 24 hours), optionally who you are (recorded with the enrollment), and a **manage key**, which is asked for each time and kept nowhere: not in storage, not after the call, not on the page. It then shows **one command** to run on the cluster, with a countdown and a Copy button; the command trades the one-time token for an ingest key of that cluster's own and applies it as the Secret the node-agent reads, so the key never passes through the page. The page watches the list and says when the cluster has enrolled (or the token expired or was revoked), and offers the spoke chart's values for the agents. The token is shown once and is gone when the panel is dismissed or the page left. See [24-enrollment.md](24-enrollment.md).
 
 The other tabs of Coroot's Configuration page (Prometheus, AI, cloud integrations, applications, notifications, organization) are not built.
 

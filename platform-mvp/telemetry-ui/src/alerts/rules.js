@@ -6,7 +6,8 @@
 //   no-traffic     a service that was getting calls now gets (almost) none. It may be down, or its callers may be.
 //   refused        a high share of the connections into it fail (refused, reset, timed out): up but not accepting.
 //   errors         a high share of the calls it answers fail with a 5xx or a gRPC server failure.
-//   no-instances   it was listening during the baseline or recent window and no longer is: its pods are gone.
+//   no-instances   it was listening during the baseline or recent window and no longer is: it has stopped sending data. A warning, not a
+//                  failure judged from the absence: scaled down on purpose looks the same. (The Applications page says which, from the inventory.)
 //   telemetry-gone ALL traffic disappeared at once. That points at the agents or the pipeline, not at every service, so it
 //                  replaces the per-service "absence" rules instead of adding to them.
 //
@@ -42,7 +43,7 @@ export const RULES = {
   'no-traffic': 'Stopped receiving traffic',
   refused: 'Connections failing',
   errors: 'Calls failing',
-  'no-instances': 'No running instances',
+  'no-instances': 'Stopped sending data',
   'telemetry-gone': 'No telemetry',
 }
 
@@ -125,7 +126,7 @@ export function evaluate({ recent, baseline }, config = {}) {
       const was = recent.listeners.seen.includes(id) || baseline.listeners.seen.includes(id)
       if (was && !recent.listeners.fresh.includes(id)) {
         noInstances = true
-        add('no-instances', id, 'critical', `${labelOf(id)} was listening and no instance has reported a listen address for the last ${Math.round(c.recentSeconds / 60)} minutes: its pods may be gone.`, {
+        add('no-instances', id, 'warning', `${labelOf(id)} was listening and no instance has reported a listen address for the last ${Math.round(c.recentSeconds / 60)} minutes: it has stopped sending data (scaled down, or gone).`, {
           lastTrafficPerSec: round(before.activity),
           baselineCallers: before.callers,
         })
