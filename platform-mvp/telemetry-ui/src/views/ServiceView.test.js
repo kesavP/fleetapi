@@ -152,6 +152,28 @@ describe('ServiceView', () => {
       expect(res).toContain('Running1')
     })
 
+    it('shows the connection and network cards under the resources', async () => {
+      const data = {
+        ...MET,
+        container_net_tcp_successful_connects_total: [{ labels: call, points: flat(2) }, { labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(20) }],
+        container_net_tcp_failed_connects_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(2) }],
+        container_net_tcp_connection_time_seconds_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(0.02) }],
+        container_net_tcp_bytes_sent_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(4096) }],
+      }
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient({}, data) })
+      const cards = w.get('[data-section=plugins]')
+      expect(cards.get('#connections').text()).toContain('Setup time (mean)1 ms')
+      expect(cards.get('#connections').text()).toContain('Failed')
+      expect(cards.get('#network').text()).toContain('Sent4 KiB/s')
+      const order = w.html()
+      expect(order.indexOf('data-section="resources"')).toBeLessThan(order.indexOf('data-section="plugins"'))
+    })
+
+    it('has no plugin cards when the project has no network metrics', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient() })
+      expect(w.find('[data-section=plugins]').exists()).toBe(false)
+    })
+
     it('links a caller to its own page', async () => {
       const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient() })
       expect(w.get('[data-table=in] a').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')

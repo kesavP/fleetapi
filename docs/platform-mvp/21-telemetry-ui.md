@@ -389,3 +389,32 @@ They are fixed at **build time** (`vite.config.js` defines them from `APP_VERSIO
 1. HTTP latency (the node-agent has a request-latency histogram; the map and the service page show p95 only for databases so far).
 2. A fleet view over several projects (the alert service already checks every project in the file).
 3. Alerts for the service itself failing, beyond its metrics: a second Alertmanager route, or a heartbeat.
+
+## Cards from plugins: Connections and Network
+
+The application page can show more cards than the ones written into it. A **card plugin** is one file in `platform-mvp/telemetry-ui/src/cards/` that
+calls `defineCard` and is listed in `cards/index.js`; the page itself needs no change. A plugin is data, not markup: it names the metrics it reads and a
+`build` function that turns them into rows of text (`label`, `value`, and a `level` of `bad` or `caution`). The page draws every card the same way
+(`components/PluginCards.vue`), as text, so a plugin cannot add markup or script to the page.
+
+How the loader treats plugins:
+
+- A card reads only the metrics the project actually has, and is left out when it has none of them or when `build` has nothing for the application.
+- All cards read at the same time, beside the CPU, memory and call figures, and never hold them up.
+- A card that cannot be read, or whose `build` throws or returns anything but text rows, is left out with a warning (the same list the page already
+  shows); the others stay. A metric marked `optional` that fails costs only a warning, not the card.
+- Metric kinds: `rate` (a counter, mean per second over the window), `gauge` (the latest value of each series still reporting) and `mean` (the mean
+  of a gauge over the window).
+
+The two plugins that ship, both from the node-agent's `container_net_*` series and both for this application only:
+
+| Card | Rows | Marked |
+|---|---|---|
+| **Connections** | Connects a second; Failed (a second and the share of all attempts); Setup time (mean) = time spent connecting over connects made; Open connections; Retransmits a second | Failed: caution from 1%, bad from 5% |
+| **Network** | Sent and Received a second; Busiest peer (bytes both ways, shown when there are two or more peers); Round trip (mean) and Slowest peer | Round trip: caution from 100 ms, bad from 500 ms |
+
+Setup time is the TCP handshake. It does not include TLS or the wait for the first byte of a response. Round-trip time comes from
+`container_net_latency_seconds`, per peer address, and is read as a gauge, not a rate.
+
+Tests: `src/cards/*.test.js` (registry, both plugins), `src/components/PluginCards.test.js` and the cases added to `api/serviceMetrics.test.js` and
+`views/ServiceView.test.js`.

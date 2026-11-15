@@ -17,7 +17,9 @@ RUN APP_VERSION="$APP_VERSION" APP_COMMIT="$APP_COMMIT" APP_BUILT="$APP_BUILT" n
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY nginx/security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY nginx/05-resolver.envsh /docker-entrypoint.d/05-resolver.envsh
+# The entrypoint sources only executable *.envsh files, and a file copied from a Windows or WSL checkout (/mnt/c) arrives without the
+# executable bit, so set it here instead of relying on the checkout.
+COPY --chmod=0755 nginx/05-resolver.envsh /docker-entrypoint.d/05-resolver.envsh
 COPY --from=build /src/dist /usr/share/nginx/html
 # Only these two are substituted into the template: the nginx variables in it ($api, $uri, ...) stay as they are.
 ENV API_UPSTREAM=http://telemetry-ingest \

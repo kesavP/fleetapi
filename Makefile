@@ -10,6 +10,7 @@
 SHELL := /usr/bin/env bash
 
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
+export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 # ── Externalized config ──────────────────────────────────────────────────────
 KIND_HUB          ?= hub
@@ -68,8 +69,8 @@ CHAINSAW_REPORT    ?= chainsaw-report.json
 CHAINSAW_RUNNER_DIR ?= deploy/platform-mvp/observability
 CRONJOB_SCHEDULE   ?= "*/2 * * * *"
 
-DOCKER_REGISTRY    ?= sojoner
-IMAGE_TAG          ?= dev
+DOCKER_REGISTRY    ?= us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images
+IMAGE_TAG          ?= v1
 BC_DIR             ?= platform-mvp/binding-controller
 WO_DIR             ?= platform-mvp/widget-operator
 OV_DIR             ?= platform-mvp/oidc-verifier
@@ -92,6 +93,9 @@ AR_IMAGE           ?= $(DOCKER_REGISTRY)/alert-router:$(IMAGE_TAG)
 TI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ingest:$(IMAGE_TAG)
 DBC_IMAGE          ?= $(DOCKER_REGISTRY)/db-collector:$(IMAGE_TAG)
 CC_IMAGE           ?= $(DOCKER_REGISTRY)/cluster-collector:$(IMAGE_TAG)
+# The node-agent is a fork of Coroot's, kept beside this repository (../fleet-node-agent); its Dockerfile builds it.
+NA_DIR             ?= ../fleet-node-agent
+NA_IMAGE           ?= $(DOCKER_REGISTRY)/node-agent:$(IMAGE_TAG)
 UI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ui:$(IMAGE_TAG)
 ALERTS_IMAGE       ?= $(DOCKER_REGISTRY)/telemetry-alerts:$(IMAGE_TAG)
 
@@ -147,7 +151,7 @@ help:
 	@echo "  make verify-all         Full clean-room: clean → deploy → validate → deploy-cd"
 
 # ── Test ─────────────────────────────────────────────────────────────────────
-.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-dbc test-dbc-integration test-dbc-pgbouncer test-dbc-e2e build-db-collector-image push-db-collector test-cc test-cc-chart test-cc-e2e test-enroll-e2e build-cluster-collector-image push-cluster-collector test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
+.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-dbc test-dbc-integration test-dbc-pgbouncer test-dbc-e2e build-db-collector-image push-db-collector test-cc test-cc-chart test-cc-e2e test-enroll-e2e build-cluster-collector-image push-cluster-collector build-node-agent-image push-node-agent test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
 test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti
 	@echo "==> All unit tests passed"
 
@@ -430,6 +434,18 @@ build-cluster-collector-image:
 push-cluster-collector:
 	$(need-image-name)
 	docker push $(CC_IMAGE)
+
+# The node-agent image, from the fork at NA_DIR (the build needs eBPF headers and takes a few minutes). Use it in the spoke chart with
+# nodeAgent.image.repository=$(DOCKER_REGISTRY)/node-agent and nodeAgent.image.tag=$(IMAGE_TAG).
+build-node-agent-image:
+	$(need-image-name)
+	@test -f "$(NA_DIR)/Dockerfile" || { echo "no node-agent source at $(NA_DIR): set NA_DIR"; exit 1; }
+	@echo "==> Building $(NA_IMAGE)"
+	docker build -t $(NA_IMAGE) --build-arg VERSION=$(IMAGE_TAG) $(NA_DIR)
+
+push-node-agent:
+	$(need-image-name)
+	docker push $(NA_IMAGE)
 
 # Not part of build-images: the UI and the alert service are opt-in, like the service they read.
 # An empty DOCKER_REGISTRY or IMAGE_TAG (an unset shell variable passed on the command line, as in DOCKER_REGISTRY=$REG) would

@@ -1,6 +1,7 @@
 import { gauges, loadMap, rates } from '../map/load'
 import { DNS_METRIC, summarizeDns } from './dns'
 import { instanceOf, workloadForId, workloadOf } from '../map/workload'
+import { loadServiceCards } from '../cards'
 
 // The metrics side of a service's page: who calls it and whom it calls (the map's edges for it), and what it uses (CPU,
 // memory, restarts). They are keyed by container, and the node-agent's naming rule turns a container id into the service name
@@ -82,6 +83,8 @@ export async function loadServiceMetrics(client, name, { seconds, now = () => Da
     dns: [DNS_METRIC, () => rates(client, DNS_METRIC, start, end)],
   }
   const keys = Object.keys(reads).filter((k) => present.has(reads[k][0]))
+  // The plugin cards read beside everything else, and never hold it up or break it: one that fails is a warning.
+  const cardsLoad = loadServiceCards(client, id, { seconds, now, present }).catch((e) => ({ cards: [], warnings: [`cards: ${e && e.message ? e.message : 'failed'}`] }))
   const [mapResult, ...settled] = await Promise.allSettled([
     loadMap(client, { seconds, now, present }),
     ...keys.map((k) => reads[k][1]()),
@@ -102,11 +105,13 @@ export async function loadServiceMetrics(client, name, { seconds, now = () => Da
   } else {
     warnings.push(`calls: ${mapResult.reason && mapResult.reason.message ? mapResult.reason.message : 'failed'}`)
   }
+  const plugin = await cardsLoad
+  warnings.push(...plugin.warnings)
   // Nothing could be read at all (the counters and every resource metric failed): usually a bad key, so say that.
-  if (!traffic && !Object.keys(series).length && warnings.length) throw new Error(warnings[0])
+  if (!traffic && !Object.keys(series).length && !plugin.cards.length && warnings.length) throw new Error(warnings[0])
 
   const resources = summarizeResources(id, series, seconds)
   const dns = series.dns ? summarizeDns(series.dns, id) : null
-  const found = !!(dns) || !!(traffic && (traffic.inbound.length || traffic.outbound.length)) || Object.values(resources).some((v) => v !== null)
-  return { traffic, resources, dns, warnings, found }
+  const found = !!(dns) || plugin.cards.length > 0 || !!(traffic && (traffic.inbound.length || traffic.outbound.length)) || Object.values(resources).some((v) => v !== null)
+  return { traffic, resources, dns, cards: plugin.cards, warnings, found }
 }

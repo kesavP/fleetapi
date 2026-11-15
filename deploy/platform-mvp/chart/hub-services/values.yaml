@@ -111,7 +111,7 @@ telemetryIngest:
   enabled: false
   namespace: monitoring
   image:
-    repository: sojoner/telemetry-ingest
+    repository: us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images/telemetry-ingest
     tag: dev
     pullPolicy: Always
   # Numeric UID of the distroless `nonroot` user.
@@ -203,11 +203,11 @@ telemetryIngest:
 # or set service.type for a private address, as for telemetryIngest.service.
 # Plain HTTP; the read key crosses it, so keep it private or put TLS in front.
 telemetryUi:
-  enabled: false
+  enabled: true
   namespace: monitoring
   replicas: 1
   image:
-    repository: sojoner/telemetry-ui
+    repository: us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images/telemetry-ui
     tag: dev
     pullPolicy: Always
   # Numeric UID of the nginx-unprivileged image's user.

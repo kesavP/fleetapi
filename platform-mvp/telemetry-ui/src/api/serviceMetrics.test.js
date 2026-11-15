@@ -116,6 +116,42 @@ describe('loadServiceMetrics', () => {
     }),
   })
 
+  describe('plugin cards', () => {
+    const net = {
+      container_net_tcp_successful_connects_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(10) }],
+      container_net_tcp_connection_time_seconds_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(0.04) }],
+      container_net_tcp_bytes_sent_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(2048) }],
+    }
+
+    it('adds the connection and network cards of the application beside the resources', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: { ...DATA, ...net } }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards.map((c) => c.id)).toEqual(['connections', 'network'])
+      expect(r.cards[0].rows.find((x) => x.label === 'Setup time (mean)').value).toBe('4 ms')
+      expect(r.cards[1].rows.find((x) => x.label === 'Sent').value).toBe('2 KiB/s')
+      expect(r.found).toBe(true)
+    })
+
+    it('has no cards for a project without those metrics, and does not ask for them', async () => {
+      const client = clientOf()
+      const r = await loadServiceMetrics(client, '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards).toEqual([])
+      expect(client.get.mock.calls.some(([, p]) => p && /container_net_tcp_(bytes|connection|retrans|active)/.test(p.name))).toBe(false)
+    })
+
+    it('keeps the page when a card cannot be read, and says which metric', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: { ...DATA, ...net }, fail: { container_net_tcp_bytes_sent_total: 'late' } }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards.map((c) => c.id)).toEqual(['connections'])
+      expect(r.warnings).toContain('Network: container_net_tcp_bytes_sent_total: late')
+      expect(r.resources.memoryBytes).toBe(1024)
+    })
+
+    it('shows cards for an application that has only network metrics', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: net }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards).toHaveLength(2)
+      expect(r.found).toBe(true)
+    })
+  })
+
   it('reads the resources of the workload the name points to', async () => {
     const r = await loadServiceMetrics(clientOf(), '/k8s/shop/b', { seconds: 600, now: NOW })
     expect(r.found).toBe(true)

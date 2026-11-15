@@ -465,3 +465,5 @@ table.apps .silence.tone-info { color: var(--muted, #667085); }
 .status-pill.caution { color: var(--warn); border-color: var(--warn); }
 .status-pill.bad { color: var(--bad); border-color: var(--bad); }
 .status-pill.muted { color: var(--muted); }
+.card dd.caution { color: var(--warn); }
+.card dd.bad { color: var(--bad); }

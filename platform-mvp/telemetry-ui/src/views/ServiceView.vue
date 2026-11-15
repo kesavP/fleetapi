@@ -3,6 +3,7 @@ import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { WINDOWS, loadService } from '../api/services'
 import { hasMetrics, loadServiceMetrics } from '../api/serviceMetrics'
+import PluginCards from '../components/PluginCards.vue'
 import { formatDuration, severityClass, summarizeLogs, summarizeSpans } from '../api/serviceStats'
 
 // Takes the client and session by injection so a test can hand it fakes.
@@ -181,6 +182,7 @@ watch(() => route.hash, scrollToHash)
                 </dl></div>
             </div>
           </template>
+          <PluginCards v-if="metrics.cards && metrics.cards.length" :cards="metrics.cards" />
         </template>
 
         <template v-if="spans && spans.total">
