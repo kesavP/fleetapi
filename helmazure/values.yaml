@@ -1,0 +1,9 @@
+nodeAgent:
+  enabled: true
+  namespace: telemetry-agent
+  createNamespace: false
+  collectorURL: http://telemetry-ingest.monitoring.svc.cluster.local
+  image:
+    repository: grandnodeacr4215.azurecr.io/node-agent
+    tag: v1
+  apiKeySecret: { name: hub-telemetry-credentials, key: apiKey }

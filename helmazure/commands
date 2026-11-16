@@ -1,0 +1,127 @@
+Deploy clickhouse, telemetry-ingest on hub cluster, chcck ingest logs show it connected and migrted
+make ingest reachable from aks and test the address from pod
+enroll aks cluster to get the key
+deploy node agent
+
+make build-node-agent-image push-node-agent
+make build-telemetry-ingest-image
+make push-telemetry-ingest
+make build-telemetry-ui-image
+make push-telemetry-ui
+
+
+
+hub-azure.yaml:
+telemetryIngest:
+  enabled: true
+  namespace: monitoring
+  image:
+    repository: grandnodeacr4215.azurecr.io/telemetry-ingest
+    tag: v1
+  serviceMonitor:
+    enabled: false          # no Prometheus Operator CRDs on a plain AKS cluster
+  detection:
+    enabled: true           # optional
+  clickhouse:
+    storage: 50Gi
+    coldStorage:
+      enabled: false
+telemetryUi:
+  enabled: true
+  image:
+    repository: grandnodeacr4215.azurecr.io/telemetry-ui
+    tag: v1
+    
+vmBindingController: {enabled: false}
+alertRouter: {enabled: false}
+metricsIngest: {enabled: false}
+spokeProbes: {enabled: false}
+
+
+
+
+apply diff and path of ui ngnix fix
+"cd "/mnt/c/Users/Kesav Chaitanya/Documents/claude-usecases/fleetapi"
+az acr login -n $ACR
+make build-telemetry-ui-image push-telemetry-ui DOCKER_REGISTRY=$ACR.azurecr.io IMAGE_TAG=v2
+Use a new tag (v2). The chart's pullPolicy is Always, but a new tag avoids any cached v1. Then roll it out without re-applying the whole hub:
+kubectl -n monitoring set image deploy/telemetry-ui \
+  $(kubectl -n monitoring get deploy telemetry-ui -o jsonpath='{.spec.template.spec.containers[0].name}')=$ACR.azurecr.io/telemetry-ui:v2
+kubectl -n monitoring rollout status deploy/telemetry-ui
+kubectl -n monitoring logs deploy/telemetry-ui | tail
+Set telemetryUi.image.tag: v2 in hub-azure.yaml too, so a later render doesn't go back to v1. Don't re-apply the hub render to roll this out, because it regenerates the ClickHouse Secrets. If you ever do render again, drop the kind: Secret documents first."
+
+-------------
+kubectl -n monitoring get svc telemetry-ingest
+NAME               TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)           AGE
+telemetry-ingest   ClusterIP   10.0.45.156   <none>        80/TCP,4317/TCP   35m
+
+------------
+ubectl -n monitoring port-forward svc/telemetry-ui 8081:8080
+get key : kubectl -n monitoring get secret telemetry-ingest-keys -o jsonpath='{.data.us\.read}' | base64 -d -> bP6rjPBYPgws7V1qEJZ4AUPgVLjvvyc4
+Registe cluster  ui enter project "us" and use the above key.
+
+
+
+----------------------
+Node Agent
+kubectl create namespace telemetry-agent
+kubectl label namespace telemetry-agent pod-security.kubernates.io/enforce=privileged --overwrite
+
+KEY=$(kubectl -n monitoring get secret telemetry-ingest-keys -o jsonpath='{.data.us\.ingest}' | base64 -d)
+echo "length:${KEY}" // should be 32 in length
+
+
+kubectl -n telemetry-agent create secret generic hub-telemetry-credentials --from-literal=apiKey="bP6rjPBYPgws7V1qEJZ4AUPgVLjvvyc4"
+
+ubectl -n telemetry-agent run curl --rm -it --restart=Never --image=curlimages/curl -- \
+> curl -s -o /dev/null -w "%{http_code}\n" http://telemetry-ingest.monitoring.svc.cluster.local/v1/metrics  >> 405 code means reachable
+
+
+values.yaml:
+nodeAgent:
+  enabled: true
+  namespace: telemetry-agent
+  createNamespace: false
+  collectorURL: http://telemetry-ingest.monitoring.svc.cluster.local
+  image:
+    repository: <acr-name>.azurecr.io/node-agent
+    tag: v1
+  apiKeySecret: { name: hub-telemetry-credentials, key: apiKey }
+  
+  helm template spoke ../deploy/platform-mvp/chart/spoke/ -n telemetry-agent \
+-f values.yaml --show-only templates/node-agent.yaml > node-agent.yaml
+
+kubectl diff -f node-agent.yaml 
+
+kubectl apply -f node-agent.yaml 
+
+kubectl -n telemetry-agent get ds node-agent
+
+ kubectl -n telemetry-agent logs ds/node-agent | grep -iE "error|permission|bpf|failed to send"
+Check the hash of secret >> kubectl -n telemetry-agent get secret hub-telemetry-credentials -o jsonpath='{.data.apiKey}' | base64 -d | sha256sum
+
+
+if key not matched 
+--------------
+KEY=$(kubectl -n monitoring get secret telemetry-ingest-keys -o jsonpath='{.data.us\.ingest}' | base64 -d)
+echo "length:${KEY}"
+
+kubectl -n telemetry-agent delete secret hub-telemetry-credentials
+
+kubectl -n telemetry-agent create secret generic hub-telemetry-credentials --from-literal=apiKey="$KEY"
+
+unset KEY
+kubectl -n telemetry-agent get secret hub-telemetry-credentials -o jsonpath='{.data.apiKey}' | base64 -d | sha256sum
+kubectl -n monitoring get secret telemetry-ingest-keys -o jsonpath='{.data.us\.ingest}' | base64 -d | sha256sum
+
+both the above keys should be identical
+
+kubectl -n telemetry-agent rollout restart ds/node-agent
+
+
+check cilium data plane or normal 
+z aks show -g $RG -n $AKS --query "networkProfile.{plugin:networkPlugin,dataplane:networkDataplane,policy:networkPolicy}" -o table
+
+
+

@@ -1,0 +1,347 @@
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+# The service never calls the Kubernetes API, so it gets no token.
+automountServiceAccountToken: false
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+# Hub-side telemetry store for the Coroot agents' data: receives it from the
+# spokes, keeps it in ClickHouse and serves it per project (one project per
+# fleet cluster). See docs/platform-mvp/20-telemetry-ingest.md.
+#
+# Keys. Each fleet cluster gets an ingest key (its agents send with it) and a
+# read key (the query API). They are generated once and kept on upgrades
+# (`lookup` finds the existing Secret); under `helm template` there is no
+# cluster, so throwaway values are rendered. projects.json is derived from the
+# same keys, so the two can never disagree.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telemetry-ingest-keys
+  namespace: monitoring
+  labels:
+    app: telemetry-ingest
+type: Opaque
+stringData:
+  us.ingest: "83pQ3o0BreGFGzkHozbA2LMLm1LGmcqg"
+  us.read: "bP6rjPBYPgws7V1qEJZ4AUPgVLjvvyc4"
+  eu.ingest: "hyVGIrUtMy5LZusd0S4dfBvShLwihYF6"
+  eu.read: "aoeD1P4Yi9Y4SaZV3q2ATtq6Q9ODbNnR"
+  projects.json: "{\"projects\":[{\"ingestKeys\":[\"83pQ3o0BreGFGzkHozbA2LMLm1LGmcqg\"],\"name\":\"us\",\"readKeys\":[\"bP6rjPBYPgws7V1qEJZ4AUPgVLjvvyc4\"]},{\"ingestKeys\":[\"hyVGIrUtMy5LZusd0S4dfBvShLwihYF6\"],\"name\":\"eu\",\"readKeys\":[\"aoeD1P4Yi9Y4SaZV3q2ATtq6Q9ODbNnR\"]}]}"
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telemetry-clickhouse
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+type: Opaque
+stringData:
+  password: "YbooG5VAFJF8XoLP0eKPWb7u"
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-clickhouse
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+spec:
+  clusterIP: None
+  selector:
+    app: telemetry-clickhouse
+  ports:
+    - name: native
+      port: 9000
+      targetPort: native
+    - name: http
+      port: 8123
+      targetPort: http
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+# How the spokes' agents reach the service. Inside this cluster the name
+# telemetry-ingest.<namespace>.svc always works. For other clusters set
+# service.type: NodePort on the kind lab (spokes use
+# http://hub-control-plane:<nodePort>), LoadBalancer on a cloud (with the
+# provider's annotation for an internal one). The query API is on the same port,
+# so whoever can reach the ingest endpoint can also try the read endpoints: the
+# keys are the only protection, and the traffic is plain HTTP. Keep it on a
+# private network, and restrict it with loadBalancerSourceRanges where the
+# provider supports that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+  labels:
+    app: telemetry-ingest
+spec:
+  type: ClusterIP
+  selector:
+    app: telemetry-ingest
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ingest
+  namespace: monitoring
+  labels:
+    app: telemetry-ingest
+spec:
+  # The service holds batches in memory until they are inserted; scale it out
+  # only after deciding how a restart should treat the rows in flight.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-ingest
+  template:
+    metadata:
+      labels:
+        app: telemetry-ingest
+    spec:
+      serviceAccountName: telemetry-ingest
+      automountServiceAccountToken: false
+      volumes:
+        - name: projects
+          secret:
+            secretName: telemetry-ingest-keys
+            items:
+              - key: projects.json
+                path: projects.json
+        - name: clickhouse-password
+          secret:
+            secretName: telemetry-clickhouse
+      containers:
+        - name: telemetry-ingest
+          image: "grandnodeacr4215.azurecr.io/telemetry-ingest:v1"
+          imagePullPolicy: Always
+          args:
+            - --listen=:8080
+            - --grpc-listen=:4317
+            - --projects-file=/etc/telemetry/projects/projects.json
+            - --clickhouse-addr=telemetry-clickhouse.monitoring.svc.cluster.local:9000
+            - --clickhouse-user=telemetry
+            - --clickhouse-password-file=/etc/telemetry/clickhouse/password
+            - --ttl-metrics=336h
+            - --ttl-traces=168h
+            - --ttl-logs=168h
+            - --ttl-profiles=168h
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: otlp-grpc
+              containerPort: 4317
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: projects
+              mountPath: /etc/telemetry/projects
+              readOnly: true
+            - name: clickhouse-password
+              mountPath: /etc/telemetry/clickhouse
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+# Source: hub-services/templates/telemetry-ingest.yaml
+# One ClickHouse replica: enough for a lab, and the tables are not replicated.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: telemetry-clickhouse
+  namespace: monitoring
+  labels:
+    app: telemetry-clickhouse
+spec:
+  serviceName: telemetry-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-clickhouse
+  template:
+    metadata:
+      labels:
+        app: telemetry-clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: "clickhouse/clickhouse-server:24.8"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLICKHOUSE_USER
+              value: telemetry
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: telemetry-clickhouse
+                  key: password
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          ports:
+            - name: native
+              containerPort: 9000
+            - name: http
+              containerPort: 8123
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+---
+# Source: hub-services/templates/telemetry-ui.yaml
+# The telemetry UI: static files and a same-origin proxy of the read API only
+# (GET; the ingest endpoints are not reachable through it). The user types a
+# project and its read key into the page; the key lives in that tab's
+# sessionStorage. Nothing here holds a key.
+# See platform-mvp/telemetry-ui/README.md.
+#
+# Plain HTTP, like the service behind it: the read key crosses this hop in a
+# header, so keep it on a private network or put TLS in front before exposing it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ui
+  namespace: monitoring
+  labels:
+    app: telemetry-ui
+spec:
+  type: ClusterIP
+  selector:
+    app: telemetry-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Source: hub-services/templates/telemetry-ui.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ui
+  namespace: monitoring
+  labels:
+    app: telemetry-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-ui
+  template:
+    metadata:
+      labels:
+        app: telemetry-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Makes the emptyDir volumes below writable by the image's user.
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # nginx writes its rendered config, pid file and temp files at start-up; the root filesystem is read-only.
+        - name: conf
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      containers:
+        - name: telemetry-ui
+          image: "grandnodeacr4215.azurecr.io/telemetry-ui:v1"
+          imagePullPolicy: Always
+          env:
+            - name: API_UPSTREAM
+              value: "http://telemetry-ingest.monitoring.svc.cluster.local"
+            # The alerts path of the read API goes to the alert service (telemetryAlerts); if it is not deployed that path
+            # answers 502 and the page does its own checking.
+            - name: ALERTS_UPSTREAM
+              value: "http://telemetry-alerts.monitoring.svc.cluster.local"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+          resources:
+            limits:
+              cpu: 200m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
