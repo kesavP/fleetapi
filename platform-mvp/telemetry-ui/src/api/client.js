@@ -87,7 +87,7 @@ export function createClient({ session, fetchImpl = (...a) => fetch(...a), base 
    * A call that changes something (POST, DELETE), which needs a MANAGE key: a different key from the one the session holds, given for this one call
    * and kept nowhere. `actor`, when it is a valid name, is recorded as who did it. The key goes in a header and in no message, like the read key.
    */
-  async function send(method, path, { key, body, actor } = {}) {
+  async function send(method, path, { key, body, actor, timeoutMs: callTimeout } = {}) {
     const s = session.get()
     if (!s || !s.project) throw new ApiError('Not connected: enter a project and a read key.', { kind: 'auth' })
     if (!validProject(s.project)) throw new ApiError('The project name must be lowercase letters, digits and dashes.', { kind: 'request' })
@@ -96,7 +96,7 @@ export function createClient({ session, fetchImpl = (...a) => fetch(...a), base 
     if (body !== undefined) headers['Content-Type'] = 'application/json'
     if (actor && ACTOR.test(actor)) headers['X-Actor'] = actor
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timer = setTimeout(() => controller.abort(), callTimeout ?? timeoutMs)
     let res
     try {
       res = await fetchImpl(`${base}/api/v1/projects/${encodeURIComponent(s.project)}/${path}`, {
@@ -136,7 +136,11 @@ export function createClient({ session, fetchImpl = (...a) => fetch(...a), base 
         throw new ApiError('The request was too large.', { status: 413, kind: 'request' })
       case 429:
         throw new ApiError(detail || 'Too many requests; try again in a moment.', { status: 429, kind: 'request' })
+      case 501:
+        throw new ApiError(detail || 'The server answered 501.', { status: 501 })
       case 502:
+        // the service's own 502 says what failed (a call it made to another service); a proxy's has no JSON, and gets the plain sentence
+        throw new ApiError(detail || 'The telemetry service is not reachable right now.', { status: 502, kind: 'unavailable' })
       case 503:
       case 504:
         throw new ApiError('The telemetry service is not reachable right now.', { status: res.status, kind: 'unavailable' })

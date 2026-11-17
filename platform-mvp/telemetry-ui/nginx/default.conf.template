@@ -9,14 +9,16 @@ map $uri $api_target {
     ~^/api/v1/projects/[^/]+/alerts/?$ ${ALERTS_UPSTREAM};
 }
 
-# Which methods a path of the API takes through the UI. Reads (GET, HEAD) everywhere; and, on a project's ENROLLMENTS only, making one (POST) and
-# revoking one (DELETE). Every other write the service has (incidents, for one) stays closed here. $uri is the decoded, normalised path, so
+# Which methods a path of the API takes through the UI. Reads (GET, HEAD) everywhere; and two writes: on a project's ENROLLMENTS, making one (POST)
+# and revoking one (DELETE); and asking for an ANALYSIS of one incident (POST .../incidents/<id>/analysis: it only adds a comment by "claude").
+# Every other write the service has (changing an incident, for one) stays closed here. $uri is the decoded, normalised path, so
 # "enrollments/../incidents" is the incidents path and gets no writes. What a write needs is a manage key in the X-API-Key header, which the
 # page asks for each time and does not keep.
 map "$request_method $uri" $method_ok {
     default 0;
     ~^(GET|HEAD)\s 1;
     "~^(POST|DELETE)\s/api/v1/projects/[^/]+/enrollments(/[0-9a-f]{12})?$" 1;   # quoted: nginx reads a { in a regex as syntax
+    "~^POST\s/api/v1/projects/[^/]+/incidents/[a-z0-9]{8}/analysis$" 1;
 }
 
 server {
@@ -55,7 +57,8 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_connect_timeout 5s;
-        proxy_read_timeout 60s;
+        # An analysis waits for the model, which thinks for a minute or two; every other call is cut off by the service itself after 30 seconds.
+        proxy_read_timeout 200s;
     }
 
     # Anything else under /api, and the ingest endpoints the agents use, are not exposed through the UI.

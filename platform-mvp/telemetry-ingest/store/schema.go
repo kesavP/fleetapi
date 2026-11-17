@@ -345,6 +345,19 @@ SETTINGS ttl_only_drop_parts = 1`,
 ) ENGINE = MergeTree
 ORDER BY (Project, ID, Time)`,
 	},
+	{ // 7: rules (see the rules package): the settings that decide when the detectors speak, so that a person can change them without a deploy. Every
+		// save is a new version and nothing is updated: the newest version of a (Project, Name) is the one in force, and the older ones are the history of who
+		// changed what and when. No TTL: it is a record, and small.
+		`CREATE TABLE IF NOT EXISTS rule_versions (
+	Project   LowCardinality(String),
+	Name      LowCardinality(String),
+	Version   UInt32,
+	UpdatedAt DateTime64(3, 'UTC'),
+	UpdatedBy String,
+	Settings  String
+) ENGINE = MergeTree
+ORDER BY (Project, Name, Version)`,
+	},
 }
 
 // MigrationCount is how many migrations the service knows: what the schema_migrations table holds once they have all been applied.

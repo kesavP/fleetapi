@@ -1,0 +1,107 @@
+---
+# Source: hub-services/templates/telemetry-ui.yaml
+# The telemetry UI: static files and a same-origin proxy of the read API only
+# (GET; the ingest endpoints are not reachable through it). The user types a
+# project and its read key into the page; the key lives in that tab's
+# sessionStorage. Nothing here holds a key.
+# See platform-mvp/telemetry-ui/README.md.
+#
+# Plain HTTP, like the service behind it: the read key crosses this hop in a
+# header, so keep it on a private network or put TLS in front before exposing it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-ui
+  namespace: monitoring
+  labels:
+    app: telemetry-ui
+spec:
+  type: ClusterIP
+  selector:
+    app: telemetry-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+
+---
+# Source: hub-services/templates/telemetry-ui.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-ui
+  namespace: monitoring
+  labels:
+    app: telemetry-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-ui
+  template:
+    metadata:
+      labels:
+        app: telemetry-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Makes the emptyDir volumes below writable by the image's user.
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # nginx writes its rendered config, pid file and temp files at start-up; the root filesystem is read-only.
+        - name: conf
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      containers:
+        - name: telemetry-ui
+          image: "grandnodeacr4215.azurecr.io/telemetry-ui:v5"
+          imagePullPolicy: Always
+          env:
+            - name: API_UPSTREAM
+              value: "http://telemetry-ingest.monitoring.svc.cluster.local"
+            # The alerts path of the read API goes to the alert service (telemetryAlerts); if it is not deployed that path
+            # answers 502 and the page does its own checking.
+            - name: ALERTS_UPSTREAM
+              value: "http://telemetry-alerts.monitoring.svc.cluster.local"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+          resources:
+            limits:
+              cpu: 200m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+
+
+
+---

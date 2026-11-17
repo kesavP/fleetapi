@@ -138,3 +138,108 @@ func TestSilenceDetectionSettings(t *testing.T) {
 		t.Fatal("the default leaves out the platform's namespaces, not the applications' or the monitoring ones")
 	}
 }
+
+func TestDependencyDetectionSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DetectDeps || c.DetectDepsShare != 0.2 || c.DetectDepsMinFailed != 5 || c.DetectDepsExclude != DefaultSilenceExclude {
+		t.Fatalf("defaults = %v %v %v %q: it must be off unless asked for", c.DetectDeps, c.DetectDepsShare, c.DetectDepsMinFailed, c.DetectDepsExclude)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--detect-deps", "--detect-deps-share", "0.5", "--detect-deps-min-failed", "20", "--detect-deps-exclude", ""})
+	if err != nil || !c.DetectDeps || c.DetectDepsShare != 0.5 || c.DetectDepsMinFailed != 20 || c.DetectDepsExclude != "" {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	for name, args := range map[string][]string{
+		"a share of zero":       {"--detect-deps", "--detect-deps-share", "0"},
+		"a share over one":      {"--detect-deps", "--detect-deps-share", "1.5"},
+		"no failed connections": {"--detect-deps", "--detect-deps-min-failed", "0"},
+		"a bad expression":      {"--detect-deps", "--detect-deps-exclude", "(unclosed"},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// settings that are not used are not checked, so an old value left in a chart cannot stop the service
+	if _, err := Parse([]string{"--projects-file", "p.json", "--detect-deps-share", "0"}); err != nil {
+		t.Errorf("a setting of a switched-off check was refused: %v", err)
+	}
+}
+
+func TestAnalysisSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AnalysisKey != "" || c.AnalysisModel != "claude-opus-5-5" {
+		t.Fatalf("defaults = %q %q: it must be off unless a key is given", c.AnalysisKey, c.AnalysisModel)
+	}
+	dir := t.TempDir()
+	key := filepath.Join(dir, "key")
+	if err := os.WriteFile(key, []byte("  sk-ant-test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--analysis-key-file", key, "--analysis-model", "claude-sonnet-5-5"})
+	if err != nil || c.AnalysisKey != "sk-ant-test-key" || c.AnalysisModel != "claude-sonnet-5-5" {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"a key file that is not there":  {"--analysis-key-file", filepath.Join(dir, "nope")},
+		"a key file with nothing in it": {"--analysis-key-file", empty},
+		"a model with a space":          {"--analysis-key-file", key, "--analysis-model", "claude opus"},
+		"no model":                      {"--analysis-key-file", key, "--analysis-model", ""},
+		"a model that is a path":        {"--analysis-key-file", key, "--analysis-model", "../x"},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// a model is not looked at while analysis is off, so a value left in a chart cannot stop the service
+	if _, err := Parse([]string{"--projects-file", "p.json", "--analysis-model", "bad model"}); err != nil {
+		t.Errorf("a setting of a switched-off feature was refused: %v", err)
+	}
+}
+
+func TestRightsizeAndRulesSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DetectRightsize || c.DetectRightsizeEvery != time.Hour || c.DetectRightsizeExclude != DefaultSilenceExclude {
+		t.Fatalf("defaults = %v %v %q: it must be off unless asked for", c.DetectRightsize, c.DetectRightsizeEvery, c.DetectRightsizeExclude)
+	}
+	if got := c.RulesDefaults["rightsize.memory"]; got.Percent != 50 || got.Days != 7 || !got.Enabled || got.Percentile != 95 {
+		t.Fatalf("rule defaults = %+v: the built-in ones when none are given", c.RulesDefaults)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--detect-rightsize", "--detect-rightsize-every", "30m", "--detect-rightsize-exclude", "",
+		"--rules-defaults", `{"rightsize.memory":{"percent":30},"rightsize.storage":{"enabled":true}}`})
+	if err != nil || !c.DetectRightsize || c.DetectRightsizeEvery != 30*time.Minute || c.DetectRightsizeExclude != "" {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	if m := c.RulesDefaults["rightsize.memory"]; m.Percent != 30 || m.Days != 7 {
+		t.Fatalf("memory = %+v", m)
+	}
+	if s := c.RulesDefaults["rightsize.storage"]; !s.Enabled || s.Percentile != 100 {
+		t.Fatalf("storage = %+v", s)
+	}
+	for name, args := range map[string][]string{
+		"a look every five minutes":  {"--detect-rightsize", "--detect-rightsize-every", "5m"},
+		"a bad expression":           {"--detect-rightsize", "--detect-rightsize-exclude", "(unclosed"},
+		"defaults that are not JSON": {"--rules-defaults", "{"},
+		"a rule that does not exist": {"--rules-defaults", `{"rightsize.network":{"percent":30}}`},
+		"a default out of range":     {"--rules-defaults", `{"rightsize.cpu":{"percent":500}}`},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// settings of a switched-off check are not checked, so a value left in a chart cannot stop the service
+	if _, err := Parse([]string{"--projects-file", "p.json", "--detect-rightsize-every", "1m", "--detect-rightsize-exclude", "(unclosed"}); err != nil {
+		t.Errorf("a setting of a switched-off check was refused: %v", err)
+	}
+}

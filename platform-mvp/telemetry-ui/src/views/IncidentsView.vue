@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import IncidentTabs from '../components/IncidentTabs.vue'
 import { formatAge, dateTime } from '../format'
 import { LOOKBACKS, listIncidents } from '../incidents/load'
 import { isDefault, toAppConfig, toDetectConfig } from '../incidents/settings'
@@ -51,6 +52,7 @@ const started = (i) => dateTime(i.start * 1000)
 
 <template>
   <div class="page-head"><h1>Incidents</h1></div>
+  <IncidentTabs />
   <section class="panel">
     <p v-if="!connected" class="help">Not connected. <router-link to="/configuration/connection">Connect with a project and its read key</router-link> first.</p>
     <template v-else>

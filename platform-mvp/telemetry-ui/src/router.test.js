@@ -32,7 +32,7 @@ describe('routes', () => {
   it('has a page for each entry of the menu, a detail page for an application and a trace, and the connection', async () => {
     const s = sessionOf(null)
     for (const [path, name] of [
-      ['/applications', 'applications'], ['/map', 'map'], ['/traces', 'traces'], ['/logs', 'logs'], ['/profiles', 'profiles'], ['/alerts', 'alerts'], ['/configuration/connection', 'connection'], ['/configuration/clickhouse', 'clickhouse'], ['/configuration/incidents', 'incident-rules'],
+      ['/applications', 'applications'], ['/recorded', 'recorded-incidents'], ['/recorded/vcxxe33p', 'recorded-incident'], ['/map', 'map'], ['/traces', 'traces'], ['/logs', 'logs'], ['/profiles', 'profiles'], ['/alerts', 'alerts'], ['/configuration/connection', 'connection'], ['/configuration/clickhouse', 'clickhouse'], ['/configuration/incidents', 'incident-rules'],
       [`/traces/${'a'.repeat(32)}`, 'trace'], ['/applications/x', 'application'],
     ]) {
       expect((await go(path, s)).name).toBe(name)

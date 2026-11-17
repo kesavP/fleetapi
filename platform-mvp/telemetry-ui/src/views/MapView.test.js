@@ -137,10 +137,39 @@ describe('MapView', () => {
     expect(w.text()).toContain('queries/s')
   })
 
-  it('warns when something could not be read, and still draws', async () => {
+  it('warns when something could not be read, in the bell at the top and not on the page, and still draws', async () => {
     const w = await mountMap({ client: clientOf({ fail: { container_net_tcp_successful_connects_total: 'down' } }) })
-    expect(w.get('[role=status]').text()).toContain('container_net_tcp_successful_connects_total: down')
+    expect(w.find('ul.warn-list').exists()).toBe(false)
+    expect(w.text()).not.toContain('container_net_tcp_successful_connects_total: down') // out of the way until the bell is pressed
+    expect(Number(w.get('[data-testid=bell-count]').text())).toBeGreaterThan(0)
+    await w.get('[data-testid=bell]').trigger('click')
+    expect(w.get('[data-testid=bell-list]').text()).toContain('container_net_tcp_successful_connects_total: down')
     expect(w.findAll('.edge').length).toBeGreaterThan(0)
+  })
+
+  it('puts the bell in the header, beside Refresh, and shows no count when there is nothing to say', async () => {
+    const w = await mountMap()
+    const kids = [...w.get('.page-head .head-right').element.children].map((c) => c.querySelector('[data-testid=bell]') ? 'bell' : c.tagName.toLowerCase() + (c.textContent.trim() === 'Refresh' ? ':refresh' : ''))
+    expect(kids.indexOf('bell')).toBeGreaterThan(-1)
+    expect(kids.indexOf('bell')).toBe(kids.indexOf('button:refresh') - 1) // directly before Refresh, which stays at the right edge
+    expect(w.find('[data-testid=bell-count]').exists()).toBe(false)
+    expect(w.get('[data-testid=bell]').attributes('aria-label')).toBe('Notifications: none')
+  })
+
+  it('lists every note the map has in the bell, as many as the count on it says', async () => {
+    const w = await mountMap({ client: clientOf({ fail: { container_net_tcp_successful_connects_total: 'down' } }) })
+    const n = w.vm.$.setupState.map.warnings.length
+    expect(n).toBeGreaterThan(0)
+    await w.get('[data-testid=bell]').trigger('click')
+    expect(w.get('[data-testid=bell-list]').findAll('li')).toHaveLength(n)
+    expect(w.get('[data-testid=bell-count]').text()).toBe(String(n))
+  })
+
+  it('counts the hover menu\'s failure with the map\'s warnings', async () => {
+    const appCache = { get: () => Promise.reject(new Error('down')) }
+    const w = await mountMap({ client: clientOf({ fail: { container_net_tcp_successful_connects_total: 'down' } }), appCache })
+    const n = w.vm.$.setupState.map.warnings.length
+    expect(w.get('[data-testid=bell-count]').text()).toBe(String(n + 1))
   })
 
   it('shows the reason when the data cannot be read at all', async () => {
@@ -552,6 +581,8 @@ describe('MapView: the hover menu', () => {
   it('says the menu\'s data could not be loaded, and still draws the map and lists the aspects', async () => {
     const appCache = { get: () => Promise.reject(new Error('The telemetry service is not reachable right now.')) }
     const w = await mountMap({ client: wide(), appCache })
+    expect(w.find('.panel [data-testid=apps-error]').exists()).toBe(false) // not on the page: in the bell
+    await w.get('[data-testid=bell]').trigger('click')
     expect(w.get('[data-testid=apps-error]').text()).toContain('not reachable')
     expect(nodeNames(w)).toContain('frontend')
     expect(items(w, 'frontend').every((i) => i.status === 'unknown')).toBe(true)
@@ -563,7 +594,7 @@ describe('MapView: the hover menu', () => {
     const w = await mountMap({ client: wide(), appCache: { get } })
     expect(get).toHaveBeenCalledTimes(1)
     expect(get.mock.calls[0][1]).toMatchObject({ project: 'gke', force: false })
-    await w.get('.head-right button').trigger('click')
+    await w.findAll('.head-right button').find((b) => b.text() === 'Refresh').trigger('click')
     await flushPromises()
     expect(get).toHaveBeenCalledTimes(2)
     expect(get.mock.calls[1][1].force).toBe(true)

@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 )
 
 type Config struct {
@@ -59,6 +61,27 @@ type Config struct {
 	// has been silent this long. Zero switches it off. DetectSilenceExclude is a regular expression for the namespaces to leave out ("" = none).
 	DetectSilenceAfter   time.Duration
 	DetectSilenceExclude string
+	// DetectDeps: also open an incident for an application that others cannot connect to: DetectDepsShare of the connection attempts into it
+	// fail, and at least DetectDepsMinFailed of them, in five minutes. Needs DetectInterval. DetectDepsExclude is the namespaces to leave out.
+	DetectDeps          bool
+	DetectDepsShare     float64
+	DetectDepsMinFailed float64
+	DetectDepsExclude   string
+
+	// Analysis: with a key, an incident can be sent (its title, summary and where its evidence is: no logs or traces) to Claude for resolution steps,
+	// which are kept on it as a comment. AnalysisKey is read from the file AnalysisKeyFile names, so the key is never in an argument or an
+	// environment; empty means the feature is off.
+	AnalysisKey   string
+	AnalysisModel string
+
+	// Right-sizing: also open an information incident for a container that uses far less than it was given (see the detect package). Which resources, how
+	// low, over how many days and by which percentile is a RULE (see the rules package): RulesDefaults are the settings of a rule nobody has saved one
+	// for, and what a project saves overrides them. DetectRightsizeEvery is how often it looks (it reads days of metrics); DetectRightsizeExclude is
+	// the namespaces to leave out.
+	DetectRightsize        bool
+	DetectRightsizeEvery   time.Duration
+	DetectRightsizeExclude string
+	RulesDefaults          map[string]rules.Settings
 
 	BatchRows     int
 	MaxBuffered   int
@@ -75,7 +98,7 @@ func Parse(args []string) (Config, error) {
 	fs.SetOutput(io.Discard)
 
 	var c Config
-	var addrs, passwordFile string
+	var addrs, passwordFile, analysisKeyFile, rulesDefaults string
 	fs.StringVar(&c.Listen, "listen", ":8080", "Address for the HTTP ingest and query API")
 	fs.StringVar(&c.GRPCListen, "grpc-listen", ":4317", "Address for OTLP/gRPC traces and logs (empty = disabled)")
 	fs.StringVar(&c.ProjectsFile, "projects-file", "", "JSON file mapping projects to ingest and read API keys (required)")
@@ -107,6 +130,16 @@ func Parse(args []string) (Config, error) {
 	fs.Float64Var(&c.DetectLatencySeconds, "detect-latency-seconds", 0.5, "A request slower than this counts against the latency objective")
 	fs.DurationVar(&c.DetectSilenceAfter, "detect-silence-after", 5*time.Minute, "Open an incident for an application that has stopped sending data once it has been silent this long (0 = off; needs the cluster collector)")
 	fs.StringVar(&c.DetectSilenceExclude, "detect-silence-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose applications are not judged for silence; empty = none")
+	fs.BoolVar(&c.DetectDeps, "detect-deps", false, "Also open an incident for an application that others cannot connect to (the callers' failed connections, from the node-agent)")
+	fs.Float64Var(&c.DetectDepsShare, "detect-deps-share", 0.2, "The share of connection attempts into an application that must fail for it to count (0 to 1)")
+	fs.Float64Var(&c.DetectDepsMinFailed, "detect-deps-min-failed", 5, "Failed connections into an application, in five minutes, before their share means anything")
+	fs.StringVar(&c.DetectDepsExclude, "detect-deps-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose applications are not judged for failing connections; empty = none")
+	fs.BoolVar(&c.DetectRightsize, "detect-rightsize", false, "Also open an incident for a container that uses far less of its memory, CPU or volume than it was given (the rules decide how low)")
+	fs.DurationVar(&c.DetectRightsizeEvery, "detect-rightsize-every", time.Hour, "How often to look for over-provisioned containers (at least 10m): each look reads days of metrics")
+	fs.StringVar(&c.DetectRightsizeExclude, "detect-rightsize-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose containers are not judged for right-sizing; empty = none")
+	fs.StringVar(&rulesDefaults, "rules-defaults", "", `JSON object of rule name to the settings that differ from the built-in defaults, such as {"rightsize.memory":{"percent":40}}; a project's saved rules override them`)
+	fs.StringVar(&analysisKeyFile, "analysis-key-file", "", "File holding an Anthropic API key: switches on 'analyse with Claude' for incidents (empty = off)")
+	fs.StringVar(&c.AnalysisModel, "analysis-model", "claude-opus-5-5", "The Claude model that writes the analysis")
 	fs.Float64Var(&c.DetectBurn, "detect-burn", 14.4, "Burn rate at which an incident is declared (14.4 = a 30-day budget gone in two days)")
 	fs.DurationVar(&c.ReloadEvery, "reload-interval", 10*time.Second, "How often the projects file is re-read")
 	if err := fs.Parse(args); err != nil {
@@ -124,6 +157,24 @@ func Parse(args []string) (Config, error) {
 			return Config{}, fmt.Errorf("read clickhouse-password-file: %w", err)
 		}
 		c.ClickHousePassword = strings.TrimSpace(string(b))
+	}
+
+	if analysisKeyFile != "" {
+		b, err := os.ReadFile(analysisKeyFile)
+		if err != nil {
+			return Config{}, fmt.Errorf("read analysis-key-file: %w", err)
+		}
+		if c.AnalysisKey = strings.TrimSpace(string(b)); c.AnalysisKey == "" {
+			return Config{}, fmt.Errorf("analysis-key-file is empty")
+		}
+		if !modelName.MatchString(c.AnalysisModel) {
+			return Config{}, fmt.Errorf("analysis-model %q must be a model id such as claude-opus-5-5", c.AnalysisModel)
+		}
+	}
+
+	var err error
+	if c.RulesDefaults, err = rules.ParseDefaults(rulesDefaults); err != nil {
+		return Config{}, err
 	}
 
 	switch {
@@ -155,6 +206,16 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("detect-silence-after must be 0 (off) or at least 1m")
 	case c.DetectSilenceExclude != "" && !validRegexp(c.DetectSilenceExclude):
 		return Config{}, fmt.Errorf("detect-silence-exclude is not a valid regular expression")
+	case c.DetectDeps && !(c.DetectDepsShare > 0 && c.DetectDepsShare <= 1):
+		return Config{}, fmt.Errorf("detect-deps-share must be above 0 and at most 1")
+	case c.DetectDeps && !(c.DetectDepsMinFailed > 0):
+		return Config{}, fmt.Errorf("detect-deps-min-failed must be positive")
+	case c.DetectDeps && c.DetectDepsExclude != "" && !validRegexp(c.DetectDepsExclude):
+		return Config{}, fmt.Errorf("detect-deps-exclude is not a valid regular expression")
+	case c.DetectRightsize && c.DetectRightsizeEvery < 10*time.Minute:
+		return Config{}, fmt.Errorf("detect-rightsize-every must be at least 10m: each look reads days of metrics")
+	case c.DetectRightsize && c.DetectRightsizeExclude != "" && !validRegexp(c.DetectRightsizeExclude):
+		return Config{}, fmt.Errorf("detect-rightsize-exclude is not a valid regular expression")
 	case c.FlushInterval <= 0, c.ReloadEvery <= 0:
 		return Config{}, fmt.Errorf("flush-interval and reload-interval must be positive")
 	case c.MaxBodyBytes < 1<<10:
@@ -164,6 +225,8 @@ func Parse(args []string) (Config, error) {
 }
 
 // identifier guards the one value that is spliced into SQL text.
+var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
+
 func identifier(s string) bool {
 	if s == "" {
 		return false

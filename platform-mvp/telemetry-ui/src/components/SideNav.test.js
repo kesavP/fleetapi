@@ -6,7 +6,7 @@ import SideNav from './SideNav.vue'
 import { createSession } from '../api/session'
 
 const stub = { template: '<i/>' }
-const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/incidents', '/incidents/:id', '/configuration/connection', '/configuration/clickhouse']
+const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/incidents', '/incidents/:id', '/recorded', '/recorded/:id', '/recordedx', '/configuration/connection', '/configuration/clickhouse']
 
 function memoryStorage() {
   const m = new Map()
@@ -56,6 +56,13 @@ describe('SideNav', () => {
     expect(items(trace.w).filter((i) => i.attributes('aria-current') === 'page').map((i) => i.text())).toEqual(['Traces'])
     const inc = await mountNav({ at: '/incidents/abc12345' })
     expect(items(inc.w).filter((i) => i.classes().includes('active')).map((i) => i.text())).toEqual(['Incidents'])
+    const rec = await mountNav({ at: '/recorded' })
+    expect(items(rec.w).filter((i) => i.classes().includes('active')).map((i) => i.text())).toEqual(['Incidents']) // the hub's recorded incidents are under Incidents too
+    const recOne = await mountNav({ at: '/recorded/vcxxe33p' })
+    expect(items(recOne.w).filter((i) => i.classes().includes('active')).map((i) => i.text())).toEqual(['Incidents'])
+    expect(items(recOne.w).filter((i) => i.attributes('aria-current') === 'page').map((i) => i.text())).toEqual(['Incidents'])
+    const recLook = await mountNav({ at: '/recordedx' })
+    expect(items(recLook.w).some((i) => i.classes().includes('active'))).toBe(false) // "/recorded" is not a prefix of "/recordedx"
     const conn = await mountNav({ at: '/configuration/connection' })
     expect(items(conn.w).some((i) => i.classes().includes('active'))).toBe(false) // the project link below is the one lit
     expect(conn.w.get('.foot .project').classes()).toContain('active')

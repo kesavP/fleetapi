@@ -1,0 +1,114 @@
+---
+# Source: hub-services/templates/telemetry-alerts.yaml
+# Checks every project for services that are not serving and serves the alerts to the UI. See docs/platform-mvp/21-telemetry-ui.md.
+#
+# It reads each project's READ key from the telemetry-ingest-keys Secret (only projects.json is mounted) and uses it to read the
+# telemetry API like any client, so it can see what a read key can see and nothing more. The alerts are served back to a caller
+# that presents one of the project's read keys.
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-alerts
+  namespace: monitoring
+  labels:
+    app: telemetry-alerts
+spec:
+  type: ClusterIP
+  selector:
+    app: telemetry-alerts
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+
+---
+# Source: hub-services/templates/telemetry-alerts.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-alerts
+  namespace: monitoring
+  labels:
+    app: telemetry-alerts
+spec:
+  # One replica: two would each keep their own idea of what is firing and each tell Alertmanager.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-alerts
+  template:
+    metadata:
+      labels:
+        app: telemetry-alerts
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Makes the state volume writable by the image's user.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: projects
+          secret:
+            secretName: telemetry-ingest-keys
+            items:
+              - key: projects.json
+                path: projects.json
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: telemetry-alerts
+          image: "grandnodeacr4215.azurecr.io/telemetry-alerts:v3"
+          imagePullPolicy: Always
+          env:
+            - name: PORT
+              value: "8081"
+            - name: READ_API
+              value: "http://telemetry-ingest.monitoring.svc.cluster.local"
+            - name: PROJECTS_FILE
+              value: /etc/telemetry/projects/projects.json
+            - name: STATE_FILE
+              value: /var/lib/telemetry-alerts/state.json
+            - name: INTERVAL_SECONDS
+              value: "60"
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: projects
+              mountPath: /etc/telemetry/projects
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/telemetry-alerts
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            limits:
+              cpu: 300m
+              memory: 192Mi
+            requests:
+              cpu: 20m
+              memory: 64Mi
+
+

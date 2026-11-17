@@ -13,6 +13,7 @@ import (
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/inventory"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/store"
 )
 
@@ -60,8 +61,31 @@ type Runner struct {
 	SilenceAfter   time.Duration
 	SilenceExclude *regexp.Regexp
 
-	silentSince map[string]time.Time // project|application -> when this runner first saw it silent
+	// Dependencies switches on the check for applications that others cannot connect to (see deps.go); Deps says when failing connections are an
+	// incident, and DepsExclude, when set, names the namespaces of dependencies to leave out.
+	Dependencies bool
+	Deps         DepConfig
+	DepsExclude  *regexp.Regexp
+
+	// Rightsize switches on the check for containers that use far less than they were given (see rightsize.go). The rules (which resources, how low, over
+	// how many days) come from Rules, which holds what a person saved for the project; without it the built-in defaults apply. It looks at most every
+	// RightsizeEvery per project, as it reads days of metrics, and RightsizeExclude, when set, names the namespaces to leave out.
+	Rightsize        bool
+	RightsizeEvery   time.Duration
+	RightsizeExclude *regexp.Regexp
+	Rules            RulesSource
+
+	silentSince   map[string]time.Time // project|application -> when this runner first saw it silent
+	lastRightsize map[string]time.Time // project -> when it last looked for over-provisioned containers
 }
+
+// RulesSource is where the rules in force for a project are read: rules.Manager in service.
+type RulesSource interface {
+	Effective(ctx context.Context, project string) (map[string]rules.Settings, error)
+}
+
+// minRightsizeEvery is the shortest wait between two looks for over-provisioned containers.
+const minRightsizeEvery = 10 * time.Minute
 
 // Validate says what is wrong with the settings, or nil.
 func (r *Runner) Validate() error {
@@ -79,6 +103,12 @@ func (r *Runner) Validate() error {
 		return fmt.Errorf("the silence delay must be zero (off) or at least a minute")
 	case r.MaxSeries <= 0 || r.MaxPoints <= 0:
 		return fmt.Errorf("the series and point limits must be positive")
+	}
+	if r.Rightsize && r.RightsizeEvery < minRightsizeEvery {
+		return fmt.Errorf("the wait between looks for over-provisioned containers must be at least %s: each reads days of metrics", minRightsizeEvery)
+	}
+	if r.Dependencies {
+		return r.Deps.Validate()
 	}
 	return nil
 }
@@ -122,8 +152,8 @@ func (r *Runner) now() time.Time {
 	return time.Now()
 }
 
-// Project looks at one project and returns how many incidents it opened: for applications burning their error budget, and for those that
-// have stopped sending. One failing does not stop the other.
+// Project looks at one project and returns how many incidents it opened: for applications burning their error budget, for those that have
+// stopped sending, and for dependencies that their callers cannot connect to. One failing does not stop the others.
 func (r *Runner) Project(ctx context.Context, project string) (int, error) {
 	names, err := r.Source.ListMetrics(ctx, project)
 	if err != nil {
@@ -136,10 +166,16 @@ func (r *Runner) Project(ctx context.Context, project string) (int, error) {
 	opened, berr := r.burning(ctx, project, has)
 	n, serr := r.silent(ctx, project, has)
 	opened += n
-	if berr != nil {
-		return opened, berr
+	n, derr := r.refused(ctx, project, has)
+	opened += n
+	n, rerr := r.rightsizing(ctx, project, has)
+	opened += n
+	for _, err := range []error{berr, serr, derr, rerr} {
+		if err != nil {
+			return opened, err
+		}
 	}
-	return opened, serr
+	return opened, nil
 }
 
 func (r *Runner) burning(ctx context.Context, project string, has map[string]bool) (int, error) {
@@ -363,12 +399,19 @@ func (r *Runner) attach(ctx context.Context, project, id string, f Found) {
 const (
 	familyBurn    = ""
 	familySilence = "silence"
+	familyDeps    = "deps"
+	familySize    = "rightsize"
 )
 
 // familyOf is which kind of incident the detector opened an incident as, from its dedupe key.
 func familyOf(i incident.Incident) string {
-	if strings.HasPrefix(i.DedupeKey, "silence:") {
+	switch {
+	case strings.HasPrefix(i.DedupeKey, "silence:"):
 		return familySilence
+	case strings.HasPrefix(i.DedupeKey, "deps:"):
+		return familyDeps
+	case strings.HasPrefix(i.DedupeKey, "rightsize:"):
+		return familySize
 	}
 	return familyBurn
 }

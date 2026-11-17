@@ -28,6 +28,8 @@ type fakeSource struct {
 	metrics   map[string][]string
 	series    map[string]map[string][]gen // project -> metric -> series
 	listErr   map[string]error
+	queryErr  map[string]error    // metric name -> a failure of reading it
+	asked     []store.MetricQuery // every query, in order
 	truncated bool
 	queries   int
 
@@ -81,8 +83,12 @@ func (f *fakeSource) QueryMetric(_ context.Context, q store.MetricQuery) (store.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries++
+	f.asked = append(f.asked, q)
+	if err := f.queryErr[q.Name]; err != nil {
+		return store.MetricResult{}, err
+	}
 	res := store.MetricResult{Series: []store.MetricSeries{}, Truncated: f.truncated}
-	if q.Name == RSSMetric {
+	if q.Name == RSSMetric && len(f.series[q.Project][q.Name]) == 0 { // the silence tests' readings, unless a test generated its own
 		for _, g := range f.rss {
 			if !g.last.Before(q.From) && !g.last.After(q.To) {
 				res.Series = append(res.Series, store.MetricSeries{Labels: g.labels, Points: []store.Point{{T: g.last.UnixMilli(), V: 1}}})

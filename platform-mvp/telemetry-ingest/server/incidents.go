@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
@@ -34,6 +35,13 @@ type Incidents struct {
 	Projects Resolver
 	Manager  *incident.Manager
 	Log      *slog.Logger
+	// Analyst, when set, answers POST .../incidents/{id}/analysis (analysis.go); without it that call answers 501.
+	Analyst Analyst
+
+	now      func() time.Time // a test's clock; nil is the real one
+	amu      sync.Mutex
+	analysed map[string]time.Time // project|id -> when its last analysis began
+	running  int                  // analyses in progress
 }
 
 func (h *Incidents) Register(mux *http.ServeMux) {
@@ -43,6 +51,7 @@ func (h *Incidents) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+base+"/{id}/events", h.read(h.events))
 	mux.HandleFunc("GET "+base+"/{id}/evidence", h.read(h.evidence))
 	mux.HandleFunc("POST "+base, h.write(h.create))
+	mux.HandleFunc("POST "+base+"/{id}/analysis", h.write(h.analyse))
 	mux.HandleFunc("PATCH "+base+"/{id}", h.write(h.update))
 	mux.HandleFunc("POST "+base+"/{id}/transitions", h.write(h.transition))
 	mux.HandleFunc("POST "+base+"/{id}/comments", h.write(h.comment))

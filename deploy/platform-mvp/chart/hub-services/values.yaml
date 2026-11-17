@@ -142,9 +142,46 @@ telemetryIngest:
     silence:
       after: 5m # silent this long before it is opened (0 = off, else at least 1m)
       exclude: '^(kube-|gke-|gmp-|gatekeeper|config-management|istio-system$|asm-|anthos|cert-manager$|ingress-nginx$|linkerd|calico|tigera|cilium|flux-system$|argocd$|olm$)' # namespaces left out; "" = none
+    # Also open an incident for an application that others cannot connect to: a database that has stopped accepting connections, or was scaled to zero
+    # while something still calls it, shows in no request metric (it is not an HTTP service, and the application in front may answer with a redirect).
+    # The callers' failed connects show it: it opens when `share` of the connection attempts into an application fail, and at least `minFailed` of
+    # them, in five minutes, for two minutes. A dependency scaled down on purpose fails its callers' connections the same: the incident says what the
+    # cluster collector reports (set to run no replicas, or not ready), so it can be closed as meant. Needs the node-agent; the cluster collector only
+    # adds that note. Off by default, and nothing is passed to the service while it is off, so an image without it still starts.
+    # Also open an INFORMATION incident for a container that uses far less than it was given (memory, CPU, or a volume), with a limit to try and
+    # how it was worked out. How low, over how many days and judged by which percentile of use is a RULE: see `rules` below, and the Rules API
+    # (changeable without a deploy). The peak of each step is read, never the average, and a container that has not been watched for most of the
+    # window is not judged; storage is off until a rule switches it on. It reads days of metrics, so it looks only every `every`. Off by default, and
+    # nothing is passed to the service while it is off, so an image without it still starts.
+    rightsizing:
+      enabled: false
+      every: 1h # at least 10m
+      exclude: '^(kube-|gke-|gmp-|gatekeeper|config-management|istio-system$|asm-|anthos|cert-manager$|ingress-nginx$|linkerd|calico|tigera|cilium|flux-system$|argocd$|olm$)' # namespaces left out; "" = none
+    dependencies:
+      enabled: false
+      share: 0.2 # the share of connection attempts into it that fail (0 to 1)
+      minFailed: 5 # failed connections in five minutes before the share means anything
+      exclude: '^(kube-|gke-|gmp-|gatekeeper|config-management|istio-system$|asm-|anthos|cert-manager$|ingress-nginx$|linkerd|calico|tigera|cilium|flux-system$|argocd$|olm$)' # namespaces left out; "" = none
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 512Mi }
+  # "Analyse with Claude" on an incident: a button on the incident page (it takes a manage key, typed per click) sends the incident's title, severity,
+  # summary and WHERE its evidence is to the Anthropic API, and keeps the resolution steps that come back as a comment by "claude". What is sent: nothing
+  # from logs or traces, no search text, address, note, person or project name; the prompt is analysis.Prompt in the service. The key is yours, in a
+  # Secret you make; each call costs what the model costs, and one incident is analysed at most every two minutes.
+  #   kubectl -n monitoring create secret generic anthropic-api-key --from-literal=apiKey=<key>
+  # Nothing is passed to the service while this is off, so an image without it still starts.
+  # The settings a rule has until a project saves its own (GET/PUT /api/v1/projects/<project>/rules): only what differs from the built-in defaults, which are
+  # memory and CPU on at 50% over 7 days judged by the 95th percentile of use, and storage off. For example
+  #   defaults: { rightsize.memory: { percent: 40 }, rightsize.storage: { enabled: true } }
+  # The Rules API is always there (it only reads and saves settings); the right-sizing detector, which uses them, is `detection.rightsizing`.
+  rules:
+    defaults: {}
+  analysis:
+    enabled: false
+    model: claude-opus-5-5
+    existingSecret: anthropic-api-key
+    secretKey: apiKey
   # How the spokes' agents reach the service (it always has the in-cluster name
   # telemetry-ingest.<namespace>.svc). ClusterIP: this cluster only. NodePort:
   # the kind lab, where spokes use http://hub-control-plane:<nodePort> over the

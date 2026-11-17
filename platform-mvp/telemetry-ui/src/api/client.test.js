@@ -226,3 +226,36 @@ describe('send (a call that changes something)', () => {
     expect(await clientWith(fakeFetch(200, null, { text: 'html' })).send('DELETE', 'enrollments/0123456789ab', { key: MANAGE })).toBeNull()
   })
 })
+
+describe('send: what a call that takes long or is answered by the service itself needs', () => {
+  const MANAGE = 'us-manage-key-0123456789abcdef'
+  it('lets one call wait longer than the client does, and still cuts it off', async () => {
+    const slow = vi.fn((url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')))))
+    // the client's own limit is an hour here: only the call's own limit can have cut this one off
+    const e = await clientWith(slow, connected, { timeoutMs: 3600000 }).send('POST', 'incidents/abcdefgh/analysis', { key: MANAGE, timeoutMs: 5 }).catch((x) => x)
+    expect(e.kind).toBe('timeout')
+    // and a call without its own limit takes the client's
+    const e2 = await clientWith(slow, connected, { timeoutMs: 5 }).send('POST', 'incidents/abcdefgh/analysis', { key: MANAGE }).catch((x) => x)
+    expect(e2.kind).toBe('timeout')
+  })
+
+  it('passes on what the service says when IT answers 501 or 502, and keeps its own words when a proxy does', async () => {
+    const a = await clientWith(fakeFetch(502, { error: 'Claude could not be reached or had a failure; try again' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(a.message).toBe('Claude could not be reached or had a failure; try again')
+    expect(a.status).toBe(502)
+    expect(a.kind).toBe('unavailable')
+    const b = await clientWith(fakeFetch(501, { error: 'analysis is not set up on this service' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(b.message).toBe('analysis is not set up on this service')
+    expect(b.status).toBe(501)
+    // a proxy's page is not JSON: nothing to pass on
+    const c = await clientWith(fakeFetch(502, null, { text: '<html>Bad gateway</html>' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(c.message).toContain('not reachable')
+    const d = await clientWith(fakeFetch(501, null)).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(d.message).toContain('answered 501')
+    // a 503 and a 504 keep the plain sentence whatever the body says: those are the service being down or overloaded, not a reason to quote
+    for (const status of [503, 504]) {
+      const e = await clientWith(fakeFetch(status, { error: 'something internal' })).send('POST', 'x', { key: MANAGE }).catch((x) => x)
+      expect(e.message).toContain('not reachable')
+    }
+  })
+})

@@ -36,6 +36,7 @@ import (
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/model"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/server"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/store"
 	logsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -1907,5 +1908,147 @@ func TestEnrollmentInClickHouse(t *testing.T) {
 	}
 	if redeemed != 2 {
 		t.Fatalf("%d redemptions recorded (two enrollments)", redeemed)
+	}
+}
+
+func TestRulesInClickHouse(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	m := rules.NewManager(r.st.Rules(), nil)
+
+	if vs, err := m.List(ctx, "us"); err != nil || len(vs) != 3 || vs[0].Saved {
+		t.Fatalf("a project with nothing saved: %+v, %v", vs, err)
+	}
+	saved := rules.Settings{Enabled: true, Percent: 40, Days: 14, Percentile: 99}
+	v, err := m.Put(ctx, "us", rules.RightsizeMemory, saved, "it", nil)
+	if err != nil || v.Version != 1 {
+		t.Fatalf("first save: %+v, %v", v, err)
+	}
+	if v, err = m.Put(ctx, "us", rules.RightsizeMemory, rules.Settings{Enabled: true, Percent: 30, Days: 14, Percentile: 99}, "it2", nil); err != nil || v.Version != 2 {
+		t.Fatalf("second save: %+v, %v", v, err)
+	}
+	if _, err := m.Put(ctx, "us", rules.RightsizeCPU, saved, "it", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// a service that was restarted holds nothing but what is in the table, and the newest version of each rule is the one in force
+	m2 := rules.NewManager(r.st.Rules(), nil)
+	eff, err := m2.Effective(ctx, "us")
+	if err != nil || eff[rules.RightsizeMemory].Percent != 30 || eff[rules.RightsizeCPU].Percent != 40 || eff[rules.RightsizeStorage] != rules.Defaults()[rules.RightsizeStorage] {
+		t.Fatalf("effective after a restart = %+v, %v", eff, err)
+	}
+	vs, _ := m2.List(ctx, "us")
+	if !vs[0].Saved || vs[0].Version != 2 || vs[0].UpdatedBy != "it2" || vs[0].UpdatedAt.IsZero() || time.Since(vs[0].UpdatedAt) > time.Hour {
+		t.Fatalf("memory = %+v", vs[0])
+	}
+	if eu, _ := m2.Effective(ctx, "eu"); eu[rules.RightsizeMemory].Percent != 50 {
+		t.Fatalf("another project saw us's rule: %+v", eu[rules.RightsizeMemory])
+	}
+	// a change based on an old read is refused, and a version that is already kept cannot be written again
+	old := uint32(1)
+	var ce *rules.ConflictError
+	if _, err := m2.Put(ctx, "us", rules.RightsizeMemory, saved, "it", &old); !errors.As(err, &ce) || ce.Current != 2 {
+		t.Fatalf("a stale save: %v", err)
+	}
+	if err := r.st.Rules().Append(ctx, "us", rules.Rule{Name: rules.RightsizeMemory, Version: 2, Settings: saved, UpdatedAt: time.Now().UTC(), UpdatedBy: "x"}); !errors.Is(err, store.ErrRuleVersionTaken) {
+		t.Fatalf("a repeated version: %v", err)
+	}
+}
+
+func TestThePeakOfAGaugeIsReadPerStepInClickHouse(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	hdr := map[string]string{"X-API-Key": usIngest, "Content-Encoding": "snappy", "Content-Type": "application/x-protobuf"}
+	hour := time.Now().Unix()/3600*3600 - 2*3600 // a whole hour, two hours ago: its readings cannot straddle two steps
+	ts := []int64{(hour + 60) * 1000, (hour + 600) * 1000, (hour + 1200) * 1000}
+	r.must(r.post("/v1/metrics", hdr, rwBody(rwSeries("pk_gauge", [][2]string{{"container_id", "/k8s/shop/web/app"}}, ts, []float64{1, 9, 2}))), 204)
+	read := func(peak bool) []store.MetricSeries {
+		res, err := r.st.QueryMetric(ctx, store.MetricQuery{Project: "us", Name: "pk_gauge", From: time.Unix(hour, 0), To: time.Unix(hour+3600, 0), StepSec: 3600, Max: peak, MaxSeries: 10, MaxPoints: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Series
+	}
+	eventually(t, "the readings to be stored", func() bool { return len(read(false)) == 1 })
+	avg, peak := read(false), read(true)
+	if len(avg[0].Points) != 1 || math.Abs(avg[0].Points[0].V-4) > 1e-9 {
+		t.Fatalf("the average of 1, 9 and 2 is 4: %+v", avg)
+	}
+	if len(peak[0].Points) != 1 || math.Abs(peak[0].Points[0].V-9) > 1e-9 {
+		t.Fatalf("the peak of 1, 9 and 2 is 9: %+v", peak)
+	}
+}
+
+// A saved rule drives the detector, end to end on stored gauges: memory use against its limit, over a window the rule names.
+func TestRightsizeFromASavedRuleOnStoredGauges(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Minute)
+	web := "/k8s/shop/web-5d6f8c7b9-xk2lp/app"
+	const gib = float64(1 << 30)
+	var samples []model.Sample
+	series := []model.Series{
+		{Project: "us", Name: detect.MemoryUsageMetric, Hash: 1, Labels: map[string]string{"container_id": web}, Seen: now},
+		{Project: "us", Name: detect.MemoryLimitMetric, Hash: 2, Labels: map[string]string{"container_id": web}, Seen: now},
+	}
+	for at := now.Add(-25 * time.Hour); !at.After(now); at = at.Add(time.Minute) {
+		use := 0.2 * gib
+		if at.Minute() == 7 { // a short peak, which an average over the step would hide
+			use = 0.35 * gib
+		}
+		samples = append(samples,
+			model.Sample{Project: "us", Name: detect.MemoryUsageMetric, Hash: 1, Time: at, Value: use},
+			model.Sample{Project: "us", Name: detect.MemoryLimitMetric, Hash: 2, Time: at, Value: gib})
+	}
+	if err := r.st.WriteSeries(ctx, series); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.WriteSamples(ctx, samples); err != nil {
+		t.Fatal(err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := incident.NewManager(r.st.Incidents(), log)
+	ruleSet := rules.NewManager(r.st.Rules(), nil)
+	newRun := func() *detect.Runner {
+		return &detect.Runner{
+			Projects: func() []string { return []string{"us"} }, Source: r.st, Incidents: mgr, Config: detect.Defaults(), Log: log,
+			Interval: time.Minute, Lookback: 3 * time.Hour, MaxAge: 30 * time.Minute, Step: 60, MaxSeries: 100, MaxPoints: 100000,
+			Rightsize: true, RightsizeEvery: time.Hour, Rules: ruleSet,
+		}
+	}
+	run := newRun()
+	if err := run.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// the built-in rule judges a week, and only a day has been stored: the container has not been watched for the whole window
+	if n, err := run.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("a week asked of a day of data opened %d, err %v", n, err)
+	}
+	// someone saves a rule that asks for a day, and the next look uses it (a new runner: no waiting for the hour)
+	if _, err := ruleSet.Put(ctx, "us", rules.RightsizeMemory, rules.Settings{Enabled: true, Percent: 50, Days: 1, Percentile: 100}, "it", nil); err != nil {
+		t.Fatal(err)
+	}
+	run2 := newRun() // a runner that has not looked yet, so it does not wait out the hour
+	n, err := run2.Project(ctx, "us")
+	if err != nil || n != 1 {
+		t.Fatalf("opened %d, err %v", n, err)
+	}
+	got, _, err := mgr.List(ctx, "us", incident.Filter{App: "/k8s/shop/web"})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("incidents = %d, err %v", len(got), err)
+	}
+	in := got[0]
+	if in.Title != "shop/web: memory over-provisioned" || in.Severity != incident.Info || in.Source != incident.Detected {
+		t.Fatalf("incident = %+v", in)
+	}
+	// judged by the highest peak (the 100th percentile): 35% of 1 GiB, which the step average would have hidden at 20%
+	if !strings.Contains(in.Summary, "highest use 35%") || !strings.Contains(in.Summary, "last 1 days") {
+		t.Fatalf("summary:\n%s", in.Summary)
+	}
+	// another look, with the same store, after the wait: the incident is still open, so there is not a second
+	run2.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	if n, err = run2.Project(ctx, "us"); err != nil || n != 0 {
+		t.Fatalf("a later look opened %d, err %v", n, err)
 	}
 }

@@ -51,6 +51,11 @@ E=$U/api/v1/projects/gke/enrollments
 echo "enroll=$(curl -s -X POST -H 'X-API-Key: m1' -H 'Content-Type: application/json' -d '{"cluster":"gke"}' $E | sed 's/.*"method": "\([A-Z]*\)".*"key": "\([a-z0-9]*\)".*/\1 \2/')"
 echo "enrolldelete=$(code -X DELETE $E/0123456789ab) enrollget=$(code $E)"
 echo "enrollblocked=$(code -X PUT $E) $(code -X PATCH $E) $(code -X DELETE $E/notanid) $(code -X POST $E/0123456789ab/x) $(code -X POST $U/api/v1/projects/gke/incidents) $(code -X POST $U/api/v1/projects/gke/enrollmentsx) $(code -X POST $U/api/v1/projects/gke/enrollments/../incidents) $(code -X DELETE $U/api/v1/projects/gke/incidents/abcdefgh)"
+# Asking for an analysis of an incident is the other write it passes on: POST, on exactly .../incidents/<8 letters or digits>/analysis
+A=$U/api/v1/projects/gke/incidents/abcdefgh/analysis
+echo "analysis=$(curl -s -X POST -H 'X-API-Key: m1' $A | sed 's/.*"method": "\([A-Z]*\)".*"path": "\([^"]*\)".*"key": "\([a-z0-9]*\)".*/\1 \2 \3/')"
+echo "analysisblocked=$(code -X PUT $A) $(code -X DELETE $A) $(code -X PATCH $A) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefg/analysis) $(code -X POST $U/api/v1/projects/gke/incidents/ABCDEFGH/analysis) $(code -X POST ${A}x) $(code -X POST $A/more) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/transitions) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/comments) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/analysis/../transitions)"
+echo "analysisread=$(code $A)"
 echo "enrolltoobig=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-API-Key: m1' -H 'Content-Type: application/json' -d "$(head -c 3000 /dev/zero | tr '\0' 'a')" $E)"
 echo "enrollingest=$(code -X POST $U/v1/enroll)"
 echo "version=$(curl -s $U/version.json | tr -d ' \n')"
@@ -90,6 +95,9 @@ has 'alertspost=405'
 has 'enroll=POST m1'
 has 'enrolldelete=200 enrollget=200'
 has 'enrollblocked=405 405 405 405 405 405 405 405'
+has 'analysis=POST /api/v1/projects/gke/incidents/abcdefgh/analysis m1'
+has 'analysisblocked=405 405 405 405 405 405 405 405 405 405'
+has 'analysisread=200'
 has 'enrolltoobig=413'
 has 'enrollingest=404'
 # the build says which build it is, in a file that can be fetched without a browser, and in the page itself

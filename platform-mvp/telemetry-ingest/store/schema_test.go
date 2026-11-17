@@ -53,3 +53,45 @@ func TestOnlyTheBigTablesAreTiered(t *testing.T) {
 		}
 	}
 }
+
+func TestTheRulesTableIsTheSeventhMigrationAndKeepsEveryVersion(t *testing.T) {
+	if MigrationCount() < 7 {
+		t.Fatalf("migrations = %d", MigrationCount())
+	}
+	var found bool
+	for _, stmt := range migrations[6] {
+		if strings.Contains(stmt, "rule_versions") {
+			found = true
+			for _, want := range []string{"Project", "Name", "Version", "UpdatedBy", "Settings", "ORDER BY (Project, Name, Version)"} {
+				if !strings.Contains(stmt, want) {
+					t.Errorf("the rules table lacks %q:\n%s", want, stmt)
+				}
+			}
+			if strings.Contains(stmt, "TTL") {
+				t.Errorf("a rule's history is a record, and must not expire:\n%s", stmt)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("migration 7 does not create rule_versions")
+	}
+}
+
+func TestAGaugeCanBeReadAsItsPeakOfEachStepAndACounterCannot(t *testing.T) {
+	cases := []struct {
+		q    MetricQuery
+		want string
+	}{
+		{MetricQuery{}, "Value"},
+		{MetricQuery{Max: true}, "Value"}, // raw samples: nothing to take a peak of
+		{MetricQuery{StepSec: 60}, "avg(Value)"},
+		{MetricQuery{StepSec: 60, Max: true}, "max(Value)"},
+		{MetricQuery{StepSec: 60, Rate: true}, "argMax(Value, Timestamp)"},
+		{MetricQuery{StepSec: 60, Rate: true, Max: true}, "argMax(Value, Timestamp)"}, // a rate is of a counter's last reading
+	}
+	for _, c := range cases {
+		if got := valueExpression(c.q); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.q, got, c.want)
+		}
+	}
+}

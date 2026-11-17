@@ -134,6 +134,54 @@ grep -qF -- "--detect-silence-after=0" <<<"$sil" || fail "silence cannot be swit
 grep -qF -- '"--detect-silence-exclude="' <<<"$sil" || fail "an empty exclusion (none) was not passed on: $(grep detect-silence <<<"$sil")"
 echo "ok: no detection flags by default; interval, burn, objectives, lookback and the silence settings pass through when enabled"
 
+echo "== dependency detection: nothing is passed on unless it is switched on, and its settings reach the service when on"
+grep -q -- "--detect-deps" <<<"$det" && fail "a --detect-deps flag rendered with detection on but dependency detection off: an image without it would not start"
+dep="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.dependencies.enabled=true --set telemetryIngest.detection.dependencies.share=0.5 --set telemetryIngest.detection.dependencies.minFailed=20)"
+for want in "- --detect-deps" "--detect-deps-share=0.5" "--detect-deps-min-failed=20" "--detect-deps-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$dep" || fail "$want missing with dependency detection on"
+done
+dep0="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.dependencies.enabled=true --set telemetryIngest.detection.dependencies.exclude=)"
+grep -qF -- '"--detect-deps-exclude="' <<<"$dep0" || fail "an empty exclusion (none) was not passed on: $(grep detect-deps <<<"$dep0")"
+render --set telemetryIngest.enabled=true --set telemetryIngest.detection.dependencies.enabled=true | grep -q -- "--detect-deps" && fail "dependency flags rendered while detection itself is off"
+echo "ok: dependency detection flags appear only when it is on (and detection is), with its settings"
+
+echo "== right-sizing and rule defaults: nothing unless switched on, then the flags"
+grep -q -- "--detect-rightsize" <<<"$det" && fail "a --detect-rightsize flag rendered with detection on but right-sizing off: an image without it would not start"
+grep -q -- "--rules-defaults" <<<"$det" && fail "--rules-defaults rendered with none given"
+rs="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true --set telemetryIngest.detection.rightsizing.every=30m)"
+for want in "- --detect-rightsize" "--detect-rightsize-every=30m" "--detect-rightsize-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$rs" || fail "$want missing with right-sizing on"
+done
+rs0="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true --set telemetryIngest.detection.rightsizing.exclude=)"
+grep -qF -- '"--detect-rightsize-exclude="' <<<"$rs0" || fail "an empty exclusion (none) was not passed on: $(grep detect-rightsize <<<"$rs0")"
+render --set telemetryIngest.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true | grep -q -- "--detect-rightsize" && fail "right-sizing flags rendered while detection itself is off"
+rd="$(render --set telemetryIngest.enabled=true --set 'telemetryIngest.rules.defaults.rightsize\.memory.percent=30' --set 'telemetryIngest.rules.defaults.rightsize\.storage.enabled=true')"
+grep -qF -- '--rules-defaults={' <<<"$rd" || fail "the rule defaults were not passed on: $(grep rules-defaults <<<"$rd")"
+python3 - "$rd" <<'PY'
+import sys, json, re
+m = re.search(r'--rules-defaults=(\{.*\})"', sys.argv[1].replace('\\"', '"'))
+assert m, "no rules-defaults"
+d = json.loads(m.group(1))
+assert d["rightsize.memory"]["percent"] == 30 and d["rightsize.storage"]["enabled"] is True, d
+PY
+echo "ok: right-sizing flags appear only when it is on (and detection is); rule defaults reach the service as one JSON flag, and only when given"
+
+echo "== analysis with Claude: nothing unless it is switched on, then a Secret mounted as a file"
+off="$(render --set telemetryIngest.enabled=true)"
+for needle in "--analysis-" "anthropic-key" "/etc/telemetry/anthropic"; do
+  grep -qF -- "$needle" <<<"$off" && fail "'$needle' rendered with analysis off: an image without it would not start"
+done
+an="$(render --set telemetryIngest.enabled=true --set telemetryIngest.analysis.enabled=true --set telemetryIngest.analysis.model=claude-sonnet-5-5)"
+for want in "--analysis-key-file=/etc/telemetry/anthropic/key" "--analysis-model=claude-sonnet-5-5" "secretName: anthropic-api-key" "mountPath: /etc/telemetry/anthropic" "- key: apiKey"; do
+  grep -qF -- "$want" <<<"$an" || fail "$want missing with analysis on"
+done
+grep -qiE "sk-ant|api[_-]?key: *[A-Za-z0-9]" <<<"$an" && fail "a key value rendered into the manifest: it belongs in a Secret the chart does not make"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.analysis.enabled=true --set telemetryIngest.analysis.existingSecret= 2>&1 || true)"
+grep -q "existingSecret is required" <<<"$out" || fail "analysis without a Secret was not refused: $out"
+out="$(render --set telemetryIngest.enabled=true --set 'telemetryIngest.analysis.enabled=true' --set 'telemetryIngest.analysis.model=bad model' 2>&1 || true)"
+grep -q "is not a model id" <<<"$out" || fail "a bad model id was not refused: $out"
+echo "ok: analysis flags and the Secret mount appear only when it is on; a missing Secret or a bad model is refused"
+
 echo "== tiered storage: off by default, and a bucket plus a Secret when on"
 off="$(render --set telemetryIngest.enabled=true)"
 for needle in "storage-policy" "cold-after" "GCS_ACCESS_KEY_ID" "telemetry-clickhouse-storage" "storage.googleapis.com"; do

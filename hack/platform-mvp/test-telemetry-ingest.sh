@@ -7,7 +7,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 mod="$root/platform-mvp/telemetry-ingest"
 ch_image="${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}"
-go_image="${GO_IMAGE:-golang:1.23}"
+go_image="${GO_IMAGE:-golang:1.25}"
 suffix="$$"
 net="ti-it-net-$suffix"
 ch="ti-it-clickhouse-$suffix"

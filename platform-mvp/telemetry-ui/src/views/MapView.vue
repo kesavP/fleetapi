@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import CategoryFilter from '../components/CategoryFilter.vue'
 import MoveToCategory from '../components/MoveToCategory.vue'
+import NotificationBell from '../components/NotificationBell.vue'
 import NamespacePicker from '../components/NamespacePicker.vue'
 import { WINDOWS } from '../api/services'
 import { alertLevels, categoryOf, healthItems, loadApplications } from '../api/applications'
@@ -93,6 +94,11 @@ const levels = computed(() => alertLevels(alerts ? alerts.state.alerts : []))
 // same time as the map and shared with that page through a short cache. If it cannot be read the map is still drawn and the menu says so.
 const appData = ref(new Map())
 const appsError = ref('')
+// What the page has to say about what it could not read or had to guess: not on the page, but in the bell at the top, with a count.
+const notifications = computed(() => [
+  ...(map.value ? map.value.warnings : []),
+  ...(appsError.value ? [{ text: `The hover menu could not load how each application is doing: ${appsError.value}`, testid: 'apps-error' }] : []),
+])
 const NOT_LOADED = ['instances', 'cpu', 'memory', 'dns', 'logs'].map((key) => ({ key, label: { instances: 'Instances', cpu: 'CPU', memory: 'Memory', dns: 'DNS', logs: 'Logs' }[key], status: 'unknown', hint: 'not loaded', anchor: key }))
 const menuItems = (n) => (appData.value.has(n.id) ? healthItems(appData.value.get(n.id)) : NOT_LOADED)
 
@@ -258,6 +264,7 @@ async function load(force = false) {
       <select id="window" v-model.number="f.seconds" @change="load">
         <option v-for="w in WINDOWS" :key="w.seconds" :value="w.seconds">Last {{ w.label }}</option>
       </select>
+      <NotificationBell :items="notifications" />
       <button type="button" class="secondary" :disabled="loading" @click="load(true)">{{ loading ? 'Loading…' : 'Refresh' }}</button>
     </div>
   </div>
@@ -282,9 +289,6 @@ async function load(force = false) {
 
       <p v-if="fatal" class="error pad" role="alert">{{ fatal }} <router-link to="/connection">Check the connection.</router-link></p>
       <template v-else-if="map">
-        <ul v-if="map.warnings.length" class="warn-list" role="status">
-          <li v-for="w in map.warnings" :key="w">{{ w }}</li>
-        </ul>
         <p v-if="!map.edges.length && !loading" class="help pad">
           No calls between services in this window.
           <template v-if="!map.hasData">The project has none of the connection or request counters yet: are the node-agents sending?</template>
@@ -359,7 +363,6 @@ async function load(force = false) {
           <button type="button" class="link" @click="notice.undo()">Undo</button>
         </p>
         <p v-if="placed && !selected" class="help pad hint">Click an application to see its calls. Hover one for its instances, CPU, memory, DNS and logs; ⋮ moves it to a category.</p>
-        <p v-if="appsError" class="help pad" role="status" data-testid="apps-error">The hover menu could not load how each application is doing: {{ appsError }}</p>
 
         <p v-if="map.learned && map.learned.used" class="help pad" data-testid="learned">
           Connections that could not be completed are shown against the application behind the Service address they dialled

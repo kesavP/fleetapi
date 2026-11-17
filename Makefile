@@ -69,8 +69,8 @@ CHAINSAW_REPORT    ?= chainsaw-report.json
 CHAINSAW_RUNNER_DIR ?= deploy/platform-mvp/observability
 CRONJOB_SCHEDULE   ?= "*/2 * * * *"
 
-DOCKER_REGISTRY    ?= us-central1-docker.pkg.dev/fleetapi-513707/k8-pods-images
-IMAGE_TAG          ?= v1
+DOCKER_REGISTRY    ?= grandnodeacr4215.azurecr.io
+IMAGE_TAG          ?= v4
 BC_DIR             ?= platform-mvp/binding-controller
 WO_DIR             ?= platform-mvp/widget-operator
 OV_DIR             ?= platform-mvp/oidc-verifier

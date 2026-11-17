@@ -16,12 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/analysis"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/config"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/server"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/store"
 )
@@ -139,7 +141,14 @@ func main() {
 	(&server.Enroll{Projects: reg, Manager: enrollments, Log: log, Count: count}).Register(mux)
 
 	incidents := incident.NewManager(s.Incidents(), log)
-	(&server.Incidents{Projects: reg, Manager: incidents, Log: log}).Register(mux)
+	inc := &server.Incidents{Projects: reg, Manager: incidents, Log: log}
+	if cfg.AnalysisKey != "" {
+		inc.Analyst = &analysis.Analyst{C: analysis.NewClient(cfg.AnalysisKey, cfg.AnalysisModel), Model: cfg.AnalysisModel}
+		log.Info("analysis of incidents on", "model", cfg.AnalysisModel)
+	}
+	inc.Register(mux)
+	ruleSet := rules.NewManager(s.Rules(), cfg.RulesDefaults)
+	(&server.Rules{Projects: reg, Manager: ruleSet, Log: log}).Register(mux)
 	if cfg.DetectInterval > 0 {
 		dc := detect.Defaults()
 		dc.Availability, dc.Latency, dc.LatencySeconds, dc.BurnThreshold = cfg.DetectAvailability, cfg.DetectLatency, cfg.DetectLatencySeconds, cfg.DetectBurn
@@ -150,6 +159,21 @@ func main() {
 		r.SilenceAfter = cfg.DetectSilenceAfter
 		if cfg.DetectSilenceExclude != "" {
 			r.SilenceExclude = regexp.MustCompile(cfg.DetectSilenceExclude) // checked by config.Parse
+		}
+		if cfg.DetectDeps {
+			r.Dependencies = true
+			r.Deps = detect.DepDefaults()
+			r.Deps.Share, r.Deps.MinFailed = cfg.DetectDepsShare, cfg.DetectDepsMinFailed
+			r.Deps.CriticalShare = max(r.Deps.CriticalShare, r.Deps.Share)
+			if cfg.DetectDepsExclude != "" {
+				r.DepsExclude = regexp.MustCompile(cfg.DetectDepsExclude) // checked by config.Parse
+			}
+		}
+		if cfg.DetectRightsize {
+			r.Rightsize, r.RightsizeEvery, r.Rules = true, cfg.DetectRightsizeEvery, ruleSet
+			if cfg.DetectRightsizeExclude != "" {
+				r.RightsizeExclude = regexp.MustCompile(cfg.DetectRightsizeExclude) // checked by config.Parse
+			}
 		}
 		if err := r.Validate(); err != nil {
 			log.Error("invalid incident detection settings", "error", err)

@@ -19,13 +19,13 @@ const ITEMS = [
   { to: '/logs', label: 'Logs', icon: 'logs' },
   { to: '/profiles', label: 'Profiles', icon: 'profiles' },
   { to: '/alerts', label: 'Alerts', icon: 'alerts', badge: true },
-  { to: '/incidents', label: 'Incidents', icon: 'incidents' },
+  { to: '/incidents', label: 'Incidents', icon: 'incidents', also: ['/recorded'] },
 ]
 
 // A page beneath a menu entry (an application, a trace) keeps its entry lit. Vue Router's own "active" class only follows nested
 // routes, and these are siblings, so it is decided from the address here.
 const route = useRoute()
-const isActive = (to) => route.path === to || route.path.startsWith(to + '/')
+const isActive = (to, also = []) => [to, ...also].some((p) => route.path === p || route.path.startsWith(p + '/'))
 
 const project = ref((session.get() || {}).project || '')
 const stop = session.subscribe(() => (project.value = (session.get() || {}).project || ''))
@@ -62,7 +62,7 @@ function toggle() {
     </div>
 
     <nav aria-label="Main menu" class="menu">
-      <router-link v-for="i in ITEMS" :key="i.to" :to="i.to" class="item" :class="{ active: isActive(i.to) }" :aria-current="isActive(i.to) ? 'page' : null" :title="collapsed ? i.label : null">
+      <router-link v-for="i in ITEMS" :key="i.to" :to="i.to" class="item" :class="{ active: isActive(i.to, i.also) }" :aria-current="isActive(i.to, i.also) ? 'page' : null" :title="collapsed ? i.label : null">
         <AppIcon :name="i.icon" />
         <span class="label">{{ i.label }}</span>
         <span v-if="i.badge && firing.length" class="badge" :class="worst" :aria-label="`${firing.length} firing`">{{ firing.length }}</span>

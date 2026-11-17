@@ -62,6 +62,9 @@ type MetricQuery struct {
 	From, To time.Time
 	StepSec  int  // 0 = raw samples
 	Rate     bool // per-second rate of a counter; needs StepSec
+	// Max, for a gauge, takes the highest reading of each step instead of the average: the peak, which is what sizing a limit is about. It means
+	// nothing with raw samples or with Rate.
+	Max bool
 	// FromZero, with Rate, treats a series that was created inside the window as a
 	// counter that started at zero there, so its first value counts as an increase.
 	// Without it, a rate needs two readings and a counter's first appearance (an
@@ -192,6 +195,20 @@ func (s *Store) ListSeries(ctx context.Context, project, name string, match map[
 	return out, nil
 }
 
+// valueExpression is what a step of the query reads of its samples: all of them when raw, a counter's last reading for a rate, the highest of a
+// gauge's when its peak is wanted, and otherwise their average.
+func valueExpression(q MetricQuery) string {
+	switch {
+	case q.StepSec <= 0:
+		return "Value"
+	case q.Rate:
+		return "argMax(Value, Timestamp)" // a counter's last reading in the bucket
+	case q.Max:
+		return "max(Value)"
+	}
+	return "avg(Value)"
+}
+
 func (s *Store) QueryMetric(ctx context.Context, q MetricQuery) (MetricResult, error) {
 	res := MetricResult{Series: []MetricSeries{}} // [] rather than null when nothing matches
 	rs, err := s.series(ctx, q.Project, q.Name, q.Match, q.MaxSeries)
@@ -221,15 +238,11 @@ func (s *Store) QueryMetric(ctx context.Context, q MetricQuery) (MetricResult, e
 		}
 	}
 
-	valueExpr, timeExpr := "Value", "toUnixTimestamp64Milli(Timestamp)"
+	valueExpr, timeExpr := valueExpression(q), "toUnixTimestamp64Milli(Timestamp)"
 	group := ""
 	if q.StepSec > 0 {
 		stepMs := int64(q.StepSec) * 1000
 		timeExpr = fmt.Sprintf("intDiv(toUnixTimestamp64Milli(Timestamp), %d) * %d", stepMs, stepMs)
-		valueExpr = "avg(Value)"
-		if q.Rate {
-			valueExpr = "argMax(Value, Timestamp)" // a counter's last reading in the bucket
-		}
 		group = " GROUP BY SeriesHash, t"
 	}
 	query := fmt.Sprintf(`SELECT SeriesHash, %s AS t, %s FROM metrics_samples

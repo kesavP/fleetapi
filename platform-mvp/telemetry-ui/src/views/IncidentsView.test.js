@@ -18,6 +18,7 @@ async function mountAt(query = '', { list = vi.fn(async () => result()), sess = 
       { path: '/incidents', name: 'incidents', component: IncidentsView },
       { path: '/incidents/:id', name: 'incident', component: stub },
       { path: '/applications/:name', name: 'application', component: stub },
+      { path: '/recorded', component: stub }, { path: '/configuration/incidents', component: stub },
     ],
   })
   router.push('/incidents' + query)
@@ -40,6 +41,13 @@ describe('IncidentsView', () => {
     expect(cells[5]).toBe('Resolved')
     expect(row.get('a.name').attributes('href')).toBe('/incidents/k3j2h1g0?window=21600')
     expect(row.findAll('a')[1].attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')
+  })
+  it('offers the list the hub has recorded as a tab beside this one, with this one marked', async () => {
+    const { w } = await mountAt()
+    const tabs = w.findAll('nav.tabs a')
+    expect(tabs.map((t) => [t.text(), t.attributes('href')])).toEqual([['From the metrics', '/incidents'], ['Recorded by the hub', '/recorded']])
+    expect(tabs[0].attributes('aria-current')).toBe('page')
+    expect(tabs[1].attributes('aria-current')).toBeUndefined()
   })
   it('says an incident that has not ended is ongoing', async () => {
     const { w } = await mountAt('', { list: async () => result({ incidents: [{ ...INCIDENT, open: true }] }) })

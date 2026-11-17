@@ -10,6 +10,8 @@ import ProfilesView from './views/ProfilesView.vue'
 import AlertsView from './views/AlertsView.vue'
 import IncidentsView from './views/IncidentsView.vue'
 import IncidentView from './views/IncidentView.vue'
+import RecordedIncidentsView from './views/RecordedIncidentsView.vue'
+import RecordedIncidentView from './views/RecordedIncidentView.vue'
 
 // Where "/" goes depends on whether there is a connection: to the applications if so, else to the page that makes one.
 export function makeRoutes(session) {
@@ -36,6 +38,9 @@ export function makeRoutes(session) {
     { path: '/alerts', name: 'alerts', component: AlertsView },
     { path: '/incidents', name: 'incidents', component: IncidentsView },
     { path: '/incidents/:id', name: 'incident', component: IncidentView },
+    // The incidents the hub has recorded (its detector's, and people's through the API), apart from the ones /incidents works out from the metrics.
+    { path: '/recorded', name: 'recorded-incidents', component: RecordedIncidentsView },
+    { path: '/recorded/:id', name: 'recorded-incident', component: RecordedIncidentView },
     { path: '/:rest(.*)*', redirect: '/' },
   ]
 }

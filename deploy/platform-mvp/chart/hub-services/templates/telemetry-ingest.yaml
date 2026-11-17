@@ -4,6 +4,11 @@
 {{- $keys := lookup "v1" "Secret" $ns "telemetry-ingest-keys" }}
 {{- $svc := $ti.service }}
 {{- $cold := $ti.clickhouse.coldStorage }}
+{{- $an := $ti.analysis }}
+{{- if $an.enabled }}
+{{- if not $an.existingSecret }}{{ fail "telemetryIngest.analysis.existingSecret is required when analysis.enabled (a Secret holding the Anthropic API key)" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9.-]*$" $an.model) }}{{ fail (printf "telemetryIngest.analysis.model %q is not a model id" $an.model) }}{{ end }}
+{{- end }}
 {{- if $cold.enabled }}
 {{- if not $cold.bucket }}{{ fail "telemetryIngest.clickhouse.coldStorage.bucket is required when coldStorage.enabled" }}{{ end }}
 {{- if not $cold.existingSecret }}{{ fail "telemetryIngest.clickhouse.coldStorage.existingSecret is required when coldStorage.enabled (a Secret with accessKeyId and secretAccessKey)" }}{{ end }}
@@ -310,6 +315,14 @@ spec:
         - name: clickhouse-password
           secret:
             secretName: telemetry-clickhouse
+{{- if $an.enabled }}
+        - name: anthropic-key
+          secret:
+            secretName: {{ $an.existingSecret }}
+            items:
+              - key: {{ $an.secretKey }}
+                path: key
+{{- end }}
       containers:
         - name: telemetry-ingest
           image: "{{ $ti.image.repository }}:{{ $ti.image.tag }}"
@@ -333,6 +346,13 @@ spec:
 {{- if $ti.exposeClusterInfo }}
             - --expose-cluster-info
 {{- end }}
+{{- if $ti.rules.defaults }}
+            - {{ printf "--rules-defaults=%s" ($ti.rules.defaults | toJson) | quote }}
+{{- end }}
+{{- if $an.enabled }}
+            - --analysis-key-file=/etc/telemetry/anthropic/key
+            - --analysis-model={{ $an.model }}
+{{- end }}
 {{- if $ti.detection.enabled }}
             - --detect-interval={{ $ti.detection.interval }}
             - --detect-lookback={{ $ti.detection.lookback }}
@@ -343,6 +363,17 @@ spec:
             - --detect-burn={{ $ti.detection.burn }}
             - --detect-silence-after={{ $ti.detection.silence.after }}
             - {{ printf "--detect-silence-exclude=%s" $ti.detection.silence.exclude | quote }}
+{{- if $ti.detection.rightsizing.enabled }}
+            - --detect-rightsize
+            - --detect-rightsize-every={{ $ti.detection.rightsizing.every }}
+            - {{ printf "--detect-rightsize-exclude=%s" $ti.detection.rightsizing.exclude | quote }}
+{{- end }}
+{{- if $ti.detection.dependencies.enabled }}
+            - --detect-deps
+            - --detect-deps-share={{ $ti.detection.dependencies.share }}
+            - --detect-deps-min-failed={{ $ti.detection.dependencies.minFailed }}
+            - {{ printf "--detect-deps-exclude=%s" $ti.detection.dependencies.exclude | quote }}
+{{- end }}
 {{- end }}
           ports:
             - name: http
@@ -371,6 +402,11 @@ spec:
             - name: clickhouse-password
               mountPath: /etc/telemetry/clickhouse
               readOnly: true
+{{- if $an.enabled }}
+            - name: anthropic-key
+              mountPath: /etc/telemetry/anthropic
+              readOnly: true
+{{- end }}
           resources:
             {{- toYaml $ti.resources | nindent 12 }}
 {{- if $ti.serviceMonitor.enabled }}
