@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addressIndex, buildGraph, learnServiceTable } from './graph'
+import { addressIndex, buildGraph, learnServiceTable, listeningAddresses } from './graph'
 
 const FE = '/k8s/shop/frontend-5d6f8c7b9-xk2lp/server'
 const CART = '/k8s/shop/cartservice-7c9d8f6b5d-bk7q2/server'
@@ -167,7 +167,7 @@ describe('buildGraph', () => {
   })
 
   it('is empty for no data', () => {
-    expect(buildGraph({})).toEqual({ nodes: [], edges: [], ignored: { loopback: 0 }, learned: { services: 0, used: 0, ambiguous: [] } })
+    expect(buildGraph({})).toEqual({ listening: {}, nodes: [], edges: [], ignored: { loopback: 0 }, learned: { services: 0, used: 0, ambiguous: [] } })
   })
 })
 
@@ -369,5 +369,49 @@ describe('connection timings on edges', () => {
     })
     expect(g.edges).toHaveLength(1)
     expect(g.edges[0].rttMs).toBeNull()
+  })
+})
+
+describe('edge targets', () => {
+  it('lists the dialled and reached address of each edge, with its rates, busiest first', () => {
+    const direct = { container_id: FE, destination: '10.4.1.9:7070' }
+    const g = buildGraph({ listen: LISTEN, conn: [s(call, 2), s(direct, 5)], fail: [s(failedTo(SVC), 1)], http: [s({ ...call, status: '200' }, 4)] })
+    expect(edge(g, '/k8s/shop/frontend', '/k8s/shop/cartservice').targets).toEqual([
+      { dialled: SVC, reached: '10.4.1.9:7070', conn: 2, failed: 0, calls: 4 },
+      { dialled: '10.4.1.9:7070', reached: '', conn: 5, failed: 0, calls: 0 },
+      { dialled: SVC, reached: '', conn: 0, failed: 1, calls: 0 },
+    ])
+  })
+
+  it('gives an external edge its address', () => {
+    const g = buildGraph({ listen: LISTEN, conn: [s({ container_id: FE, destination: '34.1.2.3:443' }, 1)] })
+    expect(g.edges[0].targets).toEqual([{ dialled: '34.1.2.3:443', reached: '', conn: 1, failed: 0, calls: 0 }])
+  })
+})
+
+describe('listeningAddresses', () => {
+  it('lists each application\'s listen addresses per pod, leaving out wildcards and in-pod loopback', () => {
+    const CART2 = '/k8s/shop/cartservice-7c9d8f6b5d-m4qzt/server'
+    const out = listeningAddresses([
+      listen(CART, '10.4.1.9:7070'), listen(CART2, '10.4.1.10:7070'), listen(CART, '0.0.0.0:7070'), listen(CART, '127.0.0.1:9090'), listen(PG, '10.4.2.2:5432'),
+    ])
+    expect(out['/k8s/shop/cartservice']).toEqual([
+      { addr: '10.4.1.9:7070', instance: 'cartservice-7c9d8f6b5d-bk7q2', current: true },
+      { addr: '10.4.1.10:7070', instance: 'cartservice-7c9d8f6b5d-m4qzt', current: true },
+    ])
+    expect(out['/k8s/data/postgres']).toEqual([{ addr: '10.4.2.2:5432', instance: 'postgres-0', current: true }])
+  })
+
+  it('marks an address that stopped being reported well before the newest as not current', () => {
+    const NEW = '/k8s/shop/cartservice-7c9d8f6b5d-w7rs9/server'
+    const out = listeningAddresses([listen(CART, '10.4.1.9:7070', 0), listen(NEW, '10.4.1.20:7070', 10 * 60 * 1000)])
+    expect(out['/k8s/shop/cartservice']).toEqual([
+      { addr: '10.4.1.20:7070', instance: 'cartservice-7c9d8f6b5d-w7rs9', current: true },
+      { addr: '10.4.1.9:7070', instance: 'cartservice-7c9d8f6b5d-bk7q2', current: false },
+    ])
+  })
+
+  it('is part of the graph', () => {
+    expect(buildGraph({ listen: LISTEN }).listening['/k8s/shop/frontend']).toEqual([{ addr: '10.4.0.5:8080', instance: 'frontend-5d6f8c7b9-xk2lp', current: true }])
   })
 })

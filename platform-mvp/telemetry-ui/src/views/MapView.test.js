@@ -99,6 +99,19 @@ describe('MapView', () => {
     expect(w.find('.detail').exists()).toBe(false)
   })
 
+  it('shows the addresses behind each call and where the selected service listens', async () => {
+    const w = await mountMap()
+    await w.findAll('.node').find((n) => n.text().includes('frontend')).trigger('click')
+    const targets = w.findAll('.detail [data-testid="targets"] li').map((l) => l.text())
+    expect(targets.some((t) => t.includes('10.0.0.9:7070') && t.includes('→') && t.includes('10.4.1.9:7070'))).toBe(true)
+    expect(targets.some((t) => t.includes('34.1.2.3:443'))).toBe(true)
+    expect(w.get('.detail').text()).toContain('No listening address reported')
+    await w.findAll('.node').find((n) => n.text().includes('cartservice')).trigger('click')
+    expect(w.get('.detail').text()).toContain('Called by')
+    expect(w.get('.detail [data-testid="listening"]').text()).toContain('10.4.1.9:7070')
+    expect(w.get('.detail [data-testid="listening"]').text()).toContain('cartservice-7c9d8f6b5d-bk7q2')
+  })
+
   it('an external endpoint has no service page', async () => {
     const w = await mountMap()
     await w.findAll('.node').find((n) => n.text().includes('34.1.2.3')).trigger('click')

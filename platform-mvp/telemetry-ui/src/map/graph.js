@@ -1,4 +1,4 @@
-import { FAILED_STATUS, HTTP_UNIT, histogramQuantile, hostOf, isLoopback, isServerError, isUnspecified, parseLe, portOf, workloadOf } from './workload.js'
+import { FAILED_STATUS, HTTP_UNIT, histogramQuantile, hostOf, isLoopback, isServerError, isUnspecified, parseLe, podOf, portOf, workloadOf } from './workload.js'
 
 // Builds the service map from the agents' counters. Input series are {labels, rate} (mean per-second rate over the
 // window); `listen` is {labels, last} from the listen-address gauge, `last` being when it was last reported (ms).
@@ -81,6 +81,37 @@ export function addressIndex(listen) {
 }
 
 /**
+ * The addresses each application accepts inbound TCP connections on, from container_net_tcp_listen_info: application id ->
+ * [{addr, instance, current}], one entry per address and pod (or machine, for a host process). A wildcard (0.0.0.0, ::) is left out, as the
+ * agent also reports the concrete pod address; so is loopback inside a pod, which nothing outside the pod can reach. `current` is false for
+ * an address that stopped being reported more than CURRENT_MS before the application's newest one: a pod replaced during the window.
+ */
+export function listeningAddresses(listen) {
+  const by = new Map() // application id -> Map("addr|instance" -> {addr, instance, last})
+  for (const s of listen) {
+    const w = workloadOf(s.labels.container_id)
+    const addr = s.labels.listen_addr
+    if (!w || !addr || isUnspecified(addr)) continue
+    if (!w.host && isLoopback(addr)) continue
+    const pod = podOf(s.labels.container_id)
+    const instance = pod ? pod.split('/').pop() : s.labels.machine_id || ''
+    if (!by.has(w.id)) by.set(w.id, new Map())
+    const key = `${addr}|${instance}`
+    const cur = by.get(w.id).get(key)
+    if (!cur || s.last > cur.last) by.get(w.id).set(key, { addr, instance, last: s.last })
+  }
+  const out = {}
+  for (const [id, m] of by) {
+    const list = [...m.values()]
+    const newest = Math.max(...list.map((v) => v.last))
+    out[id] = list
+      .map(({ addr, instance, last }) => ({ addr, instance, current: last >= newest - CURRENT_MS }))
+      .sort((a, b) => b.current - a.current || a.addr.localeCompare(b.addr, undefined, { numeric: true }) || a.instance.localeCompare(b.instance))
+  }
+  return out
+}
+
+/**
  * What each Service address (as dialled, "ip:port") leads to, learned from successful connections: every series that carries both the
  * dialled and the reached address, where the reached pod is a known application, is one vote for that application, weighted by its rate.
  * Returns {table: Map(dialled -> workload), ambiguous: [{destination, workloads}]}.
@@ -120,6 +151,17 @@ export function learnServiceTable(series, ips) {
  * fails never becomes a request: a callee refusing connections would otherwise look healthy while some calls get
  * through. That is an approximation (a client that retries makes several attempts) but it keeps the failure visible.
  */
+// One address pair of an edge, with its rates per second: successful connections (`conn`), failed connects (`failed`) and calls of any
+// protocol (`calls`, kept apart: a request is not a connection).
+function addTarget(targets, dest, actual, kind, rate) {
+  if (!dest && !actual) return
+  const reached = actual && actual !== dest ? actual : ''
+  const key = `${dest}\n${reached}`
+  const t = targets.get(key) || { dialled: dest || actual, reached, conn: 0, failed: 0, calls: 0 }
+  t[kind === 'fail' ? 'failed' : kind] += rate || 0
+  targets.set(key, t)
+}
+
 export function buildGraph({ listen = [], conn = [], fail = [], http = [], protocols = [], learn = [], connTime = [], rtt = [] }) {
   const ips = addressIndex(listen)
   // `learn` is more successful connections, from a longer look than the window: a Service that has been failing for the whole window
@@ -178,8 +220,9 @@ export function buildGraph({ listen = [], conn = [], fail = [], http = [], proto
       node({ id: src.id, ns: src.ns, name: src.name, label: src.label, external: false })
       node({ id: dst.id, ns: dst.ns, name: dst.name, label: dst.label, external: !!dst.external })
       const key = `${src.id}\n${dst.id}`
-      if (!edges.has(key)) edges.set(key, { from: src.id, to: dst.id, conn: 0, fail: 0, connTime: 0, rttSum: 0, rttN: 0, calls: {}, latency: {} })
+      if (!edges.has(key)) edges.set(key, { from: src.id, to: dst.id, conn: 0, fail: 0, connTime: 0, rttSum: 0, rttN: 0, calls: {}, latency: {}, targets: new Map() })
       const e = edges.get(key)
+      if (kind === 'conn' || kind === 'fail' || kind === 'calls') addTarget(e.targets, dest, actual, kind, rate)
       if (kind === 'conn' || kind === 'fail' || kind === 'conntime') {
         e[kind === 'conntime' ? 'connTime' : kind] += rate
       } else if (kind === 'calls') {
@@ -261,10 +304,14 @@ export function buildGraph({ listen = [], conn = [], fail = [], http = [], proto
       protocol: dominant,
       protocols: active.map(([p]) => p).sort(),
       unit: active.length ? (active.length === 1 ? units[dominant] : 'calls/s') : null,
+      // The addresses the caller connected to on this edge, busiest first: `dialled` is the address as dialled (often a Service's cluster
+      // IP), `reached` the pod address it was translated to ('' when there was none: a failed connect, or no translation reported).
+      targets: [...e.targets.values()].sort((a, b) => b.conn + b.failed + b.calls - (a.conn + a.failed + a.calls) || a.dialled.localeCompare(b.dialled)),
     })
   }
   for (const n of nodes.values()) n.serves = [...(serves.get(n.id) || [])].sort()
   return {
+    listening: listeningAddresses(listen),
     nodes: [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id)),
     edges: out.sort((a, b) => (a.from + a.to).localeCompare(b.from + b.to)),
     ignored: { loopback: loopback.size },

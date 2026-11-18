@@ -162,6 +162,15 @@ const linked = computed(() => {
   return s
 })
 const node = computed(() => byId.value.get(selected.value) || null)
+// The addresses the selected application accepts inbound TCP connections on (container_net_tcp_listen_info), per pod.
+const listening = computed(() => (node.value && map.value && map.value.listening ? map.value.listening[node.value.id] || [] : []))
+const targetText = (t) => {
+  const r = []
+  if (t.calls > 0) r.push(`${rate(t.calls)} calls/s`)
+  if (t.conn > 0) r.push(`${rate(t.conn)} conn/s`)
+  if (t.failed > 0) r.push(`${rate(t.failed)} failed/s`)
+  return r.join(', ')
+}
 const inbound = computed(() => drawn.value.filter((e) => e.to === selected.value))
 const outbound = computed(() => drawn.value.filter((e) => e.from === selected.value))
 const table = computed(() => [...drawn.value].sort((a, b) => b.errPct - a.errPct || (b.rps ?? 0) - (a.rps ?? 0)))
@@ -346,11 +355,21 @@ async function load(force = false) {
           <p v-if="!inbound.length && !outbound.length" class="help">No calls in the window.</p>
           <template v-if="outbound.length">
             <h4>Calls out</h4>
-            <ul class="events"><li v-for="e in outbound" :key="e.key"><span :class="e.level">●</span> {{ label(e.to) }} — {{ edgeText(e) }}</li></ul>
+            <ul class="events"><li v-for="e in outbound" :key="e.key"><span :class="e.level">●</span> {{ label(e.to) }} — {{ edgeText(e) }}
+              <ul v-if="e.targets && e.targets.length" class="targets" data-testid="targets"><li v-for="t in e.targets" :key="t.dialled + t.reached">
+                <code>{{ t.dialled }}</code><template v-if="t.reached"> → <code>{{ t.reached }}</code></template> <span class="muted">{{ targetText(t) }}</span></li></ul></li></ul>
           </template>
           <template v-if="inbound.length">
             <h4>Called by</h4>
-            <ul class="events"><li v-for="e in inbound" :key="e.key"><span :class="e.level">●</span> {{ label(e.from) }} — {{ edgeText(e) }}</li></ul>
+            <ul class="events"><li v-for="e in inbound" :key="e.key"><span :class="e.level">●</span> {{ label(e.from) }} — {{ edgeText(e) }}
+              <ul v-if="e.targets && e.targets.length" class="targets" data-testid="targets"><li v-for="t in e.targets" :key="t.dialled + t.reached">
+                <code>{{ t.dialled }}</code><template v-if="t.reached"> → <code>{{ t.reached }}</code></template> <span class="muted">{{ targetText(t) }}</span></li></ul></li></ul>
+          </template>
+          <template v-if="!node.external">
+            <h4>Listening on</h4>
+            <ul v-if="listening.length" class="events" data-testid="listening"><li v-for="l in listening" :key="l.addr + l.instance">
+              <code>{{ l.addr }}</code> <span class="muted">{{ l.instance }}<template v-if="!l.current"> (earlier in the window)</template></span></li></ul>
+            <p v-else class="help">No listening address reported in the window.</p>
           </template>
         </section>
         <p v-if="notice" class="notice pad" role="status" data-testid="notice">
