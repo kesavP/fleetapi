@@ -1,4 +1,4 @@
-# promtool unit tests for the VmSet, spoke API probe and spoke pod/node alerts. Run with `make test-alerts`, which
+# promtool unit tests for the VmSet, spoke API probe and spoke pod/node/workload alerts. Run with `make test-alerts`, which
 # renders the hub-services chart and tests the rules it actually produces.
 rule_files:
   - rules.yaml
@@ -357,3 +357,165 @@ tests:
             exp_annotations:
               summary: "No pod metrics are arriving from cluster us"
               description: "The metrics agent on cluster us has stopped sending, or never started; check it and the hub's metrics-ingest."
+
+  # A Deployment short of available replicas alerts after the grace period. A paused one, a healthy one
+  # and one on the hub (no cluster label) never do. The same Deployment, with only some replicas on the
+  # new version, is a stuck rollout.
+  - interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{cluster="us",namespace="acme-corp",deployment="web"}'
+        values: '3x20'
+      - series: 'kube_deployment_status_replicas_available{cluster="us",namespace="acme-corp",deployment="web"}'
+        values: '1x20'
+      - series: 'kube_deployment_status_replicas_updated{cluster="us",namespace="acme-corp",deployment="web"}'
+        values: '1x20'
+      - series: 'kube_deployment_spec_paused{cluster="us",namespace="acme-corp",deployment="web"}'
+        values: '0x20'
+      - series: 'kube_deployment_spec_replicas{cluster="us",namespace="acme-corp",deployment="paused"}'
+        values: '2x20'
+      - series: 'kube_deployment_status_replicas_available{cluster="us",namespace="acme-corp",deployment="paused"}'
+        values: '0x20'
+      - series: 'kube_deployment_status_replicas_updated{cluster="us",namespace="acme-corp",deployment="paused"}'
+        values: '0x20'
+      - series: 'kube_deployment_spec_paused{cluster="us",namespace="acme-corp",deployment="paused"}'
+        values: '1x20'
+      - series: 'kube_deployment_spec_replicas{cluster="eu",namespace="acme-corp",deployment="ok"}'
+        values: '2x20'
+      - series: 'kube_deployment_status_replicas_available{cluster="eu",namespace="acme-corp",deployment="ok"}'
+        values: '2x20'
+      - series: 'kube_deployment_status_replicas_updated{cluster="eu",namespace="acme-corp",deployment="ok"}'
+        values: '2x20'
+      - series: 'kube_deployment_spec_replicas{namespace="monitoring",deployment="hub"}'
+        values: '2x20'
+      - series: 'kube_deployment_status_replicas_available{namespace="monitoring",deployment="hub"}'
+        values: '0x20'
+      - series: 'kube_deployment_status_replicas_updated{namespace="monitoring",deployment="hub"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SpokeDeploymentReplicasMismatch
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: SpokeDeploymentReplicasMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+              namespace: acme-corp
+              deployment: web
+            exp_annotations:
+              summary: "Deployment acme-corp/web is missing replicas on cluster us"
+              description: "Deployment acme-corp/web on cluster us wants 3 replicas but fewer are available."
+      - eval_time: 17m
+        alertname: SpokeDeploymentRolloutStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+              namespace: acme-corp
+              deployment: web
+            exp_annotations:
+              summary: "Rollout of Deployment acme-corp/web is stuck on cluster us"
+              description: "Only 1 replicas of Deployment acme-corp/web on cluster us run the current version; the rollout is not progressing."
+
+  # A StatefulSet short of ready replicas, and one part-way through an update, alert; a healthy one does not.
+  - interval: 1m
+    input_series:
+      - series: 'kube_statefulset_replicas{cluster="us",namespace="acme-corp",statefulset="db"}'
+        values: '3x20'
+      - series: 'kube_statefulset_status_replicas_ready{cluster="us",namespace="acme-corp",statefulset="db"}'
+        values: '2x20'
+      - series: 'kube_statefulset_status_replicas_updated{cluster="us",namespace="acme-corp",statefulset="db"}'
+        values: '2x20'
+      - series: 'kube_statefulset_replicas{cluster="us",namespace="acme-corp",statefulset="ok"}'
+        values: '1x20'
+      - series: 'kube_statefulset_status_replicas_ready{cluster="us",namespace="acme-corp",statefulset="ok"}'
+        values: '1x20'
+      - series: 'kube_statefulset_status_replicas_updated{cluster="us",namespace="acme-corp",statefulset="ok"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SpokeStatefulSetReplicasMismatch
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: SpokeStatefulSetReplicasMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+              namespace: acme-corp
+              statefulset: db
+            exp_annotations:
+              summary: "StatefulSet acme-corp/db is missing ready replicas on cluster us"
+              description: "StatefulSet acme-corp/db on cluster us wants 3 replicas but fewer are ready."
+      - eval_time: 17m
+        alertname: SpokeStatefulSetRolloutStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: us
+              namespace: acme-corp
+              statefulset: db
+            exp_annotations:
+              summary: "Rollout of StatefulSet acme-corp/db is stuck on cluster us"
+              description: "Only 2 replicas of StatefulSet acme-corp/db on cluster us run the current revision; the rollout is not progressing."
+
+  # A DaemonSet missing from a node alerts after 10m; not-ready and not-updated pods after 15m.
+  - interval: 1m
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{cluster="eu",namespace="telemetry-agent",daemonset="node-agent"}'
+        values: '3x20'
+      - series: 'kube_daemonset_status_current_number_scheduled{cluster="eu",namespace="telemetry-agent",daemonset="node-agent"}'
+        values: '2x20'
+      - series: 'kube_daemonset_status_number_ready{cluster="eu",namespace="telemetry-agent",daemonset="node-agent"}'
+        values: '2x20'
+      - series: 'kube_daemonset_status_updated_number_scheduled{cluster="eu",namespace="telemetry-agent",daemonset="node-agent"}'
+        values: '1x20'
+      - series: 'kube_daemonset_status_desired_number_scheduled{cluster="eu",namespace="kube-system",daemonset="ok"}'
+        values: '3x20'
+      - series: 'kube_daemonset_status_current_number_scheduled{cluster="eu",namespace="kube-system",daemonset="ok"}'
+        values: '3x20'
+      - series: 'kube_daemonset_status_number_ready{cluster="eu",namespace="kube-system",daemonset="ok"}'
+        values: '3x20'
+      - series: 'kube_daemonset_status_updated_number_scheduled{cluster="eu",namespace="kube-system",daemonset="ok"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: SpokeDaemonSetNotScheduled
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SpokeDaemonSetNotScheduled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: eu
+              namespace: telemetry-agent
+              daemonset: node-agent
+            exp_annotations:
+              summary: "DaemonSet telemetry-agent/node-agent is not scheduled on every node of cluster eu"
+              description: "DaemonSet telemetry-agent/node-agent on cluster eu should run on 3 nodes but has pods on fewer."
+      - eval_time: 12m
+        alertname: SpokeDaemonSetPodsNotReady
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: SpokeDaemonSetPodsNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: eu
+              namespace: telemetry-agent
+              daemonset: node-agent
+            exp_annotations:
+              summary: "DaemonSet telemetry-agent/node-agent has pods that are not ready on cluster eu"
+              description: "DaemonSet telemetry-agent/node-agent on cluster eu should have 3 ready pods but has fewer."
+      - eval_time: 17m
+        alertname: SpokeDaemonSetRolloutStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: eu
+              namespace: telemetry-agent
+              daemonset: node-agent
+            exp_annotations:
+              summary: "Rollout of DaemonSet telemetry-agent/node-agent is stuck on cluster eu"
+              description: "Only 1 pods of DaemonSet telemetry-agent/node-agent on cluster eu run the current version; the rollout is not progressing."

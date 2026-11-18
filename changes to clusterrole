@@ -1,0 +1,53 @@
+What adding them involves
+
+1. In the ClusterRole, add a rule for apiGroups: ["apps"] with resources: ["deployments", "statefulsets"] and verbs list and watch.
+2. Change the argument to --resources=pods,nodes,deployments,statefulsets.
+3. Extend the keep regex with the metrics you want, for example:
+   - kube_deployment_status_replicas_available, kube_deployment_spec_replicas, kube_deployment_status_replicas_unavailable, kube_deployment_status_observed_generation, kube_deployment_metadata_generation
+   - kube_statefulset_status_replicas_ready, kube_statefulset_replicas, kube_statefulset_status_current_revision, kube_statefulset_status_update_revision
+4. Optionally, add alerts in hub-services/templates/spoke-metrics-alerts.yaml, such as SpokeDeploymentReplicasMismatch and SpokeStatefulSetReplicasMismatch, so the new data actually pages someone.
+
+
+Spoke clusters now collect Deployment, StatefulSet and DaemonSet state, and the hub has 7 new alerts on it. I rendered both charts with helm template; the hub rules pass promtool's lint and unit tests (23 rules, all passing). I haven't deployed it to a cluster, and nothing is committed.
+
+What the spoke sends (spoke/templates/metrics-agent.yaml)
+- The kube-state-metrics ClusterRole can now list and watch deployments, statefulsets and daemonsets in the apps API group.
+- kube-state-metrics now runs with --resources=pods,nodes,deployments,statefulsets,daemonsets.
+- Only the series the alerts use are added to the allow-list, so the number of series stays small:
+  - Deployments: kube_deployment_spec_replicas, kube_deployment_spec_paused, kube_deployment_status_replicas_available, kube_deployment_status_replicas_updated
+  - StatefulSets: kube_statefulset_replicas, kube_statefulset_status_replicas_ready, kube_statefulset_status_replicas_updated
+  - DaemonSets: kube_daemonset_status_desired_number_scheduled, kube_daemonset_status_current_number_scheduled, kube_daemonset_status_number_ready, kube_daemonset_status_updated_number_scheduled
+
+New alerts (a spoke-workloads group in hub-services/templates/spoke-metrics-alerts.yaml, all severity warning)
+
+┌──────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────┬──────┐
+│              Alert               │                                   Fires when                                   │ Wait │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeDeploymentReplicasMismatch  │ fewer replicas available than wanted (paused Deployments are skipped)          │ 15m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeDeploymentRolloutStuck      │ fewer replicas on the new version than wanted (paused Deployments are skipped) │ 15m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeStatefulSetReplicasMismatch │ fewer ready replicas than wanted                                               │ 15m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeStatefulSetRolloutStuck     │ fewer replicas on the current revision than wanted                             │ 15m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeDaemonSetNotScheduled       │ some nodes it should run on have no pod                                        │ 10m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeDaemonSetPodsNotReady       │ fewer ready pods than nodes it should run on                                   │ 15m  │
+├──────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┼──────┤
+│ SpokeDaemonSetRolloutStuck       │ fewer pods on the new version than nodes it should run on                      │ 15m  │
+└──────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┴──────┘
+
+- Each alert covers one workload and carries cluster, namespace and the workload name, so the existing Alertmanager routing applies.
+- The hub's own workloads have no cluster label, so they're excluded, as with the pod alerts.
+- The wait times are three new settings in hub-services/values.yaml under spokeMetrics: replicasMismatchFor, rolloutStuckFor and daemonSetNotScheduledFor.
+
+Tests and docs
+- tests/alerts/vmset-alerts.test.yaml has three new test cases. They check that each alert fires after its wait and not before, and that it doesn't fire for a paused Deployment, a healthy workload, or a hub workload.
+- I added the new alerts to the table in docs/platform-mvp/08-observability.md.
+
+Things to know
+- False alarms: a StatefulSet using OnDelete or a partition deliberately updates only some pods, so SpokeStatefulSetRolloutStuck stays firing until those pods are replaced. If you have such StatefulSets, I can exclude them by label.
+- make test-alerts fails as checked in: hack/platform-mvp/test-vmset-alerts.sh isn't executable in git (mode 100644), so the make target stops with "Permission denied". I ran the script with bash directly. git update-index --chmod=+x on it would fix the target.
+- Untracked file: there's a file in the repo root called changes to clusterrole. I didn't touch it.
+- Deploying: after upgrading the spoke chart, the kube-state-metrics pod has to restart to pick up the new --resources argument. helm upgrade does that because the pod spec changes.

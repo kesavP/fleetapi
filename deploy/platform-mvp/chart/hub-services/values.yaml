@@ -293,6 +293,11 @@ spokeMetrics:
   # A spoke whose agent stops sending leaves nothing to alert on, so absence
   # is itself an alert. It must outlast Prometheus's 5m staleness window.
   missingFor: 10m
+  # Deployments, StatefulSets and DaemonSets. Long enough that a normal rollout
+  # or scale-up (pulling images, readiness probes) does not alert.
+  replicasMismatchFor: 15m
+  rolloutStuckFor: 15m
+  daemonSetNotScheduledFor: 10m
 
 # Reachability probes of each spoke's API server, from the hub: is it up, how
 # fast does it answer, and when does its certificate expire. A blackbox

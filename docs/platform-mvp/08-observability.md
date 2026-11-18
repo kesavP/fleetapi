@@ -172,8 +172,8 @@ spoke:  kube-state-metrics ──┐
                                   (cluster=<name>)    basic auth       POST /api/v1/write only
 ```
 
-- **Agent** (`spoke/templates/metrics-agent.yaml`, `metricsAgent` values): kube-state-metrics for pods
-  and nodes, plus each kubelet's cAdvisor endpoint for pod CPU, memory and network. An allow-list
+- **Agent** (`spoke/templates/metrics-agent.yaml`, `metricsAgent` values): kube-state-metrics for pods,
+  nodes, Deployments, StatefulSets and DaemonSets, plus each kubelet's cAdvisor endpoint for pod CPU, memory and network. An allow-list
   keeps only the series the hub uses, and cAdvisor series without a pod label (cgroup aggregates)
   are dropped, so cardinality stays bounded. Every series carries `cluster=<clusterName>`, which
   must equal the cluster's name in the hub's `fleet.clusters` (the same label the probes use).
@@ -196,6 +196,13 @@ spoke:  kube-state-metrics ──┐
 | `SpokePodNotReady` | a pod stays `Pending`, `Failed` or `Unknown` (finished Jobs are ignored) | 15m |
 | `SpokeNodeNotReady` (critical) | a node's Ready condition is false | 5m |
 | `SpokeMetricsMissing` | no pod metrics arrive from a cluster (agent stopped, or never started) | 10m |
+| `SpokeDeploymentReplicasMismatch` | a Deployment has fewer available replicas than it wants (paused ones are ignored) | 15m |
+| `SpokeDeploymentRolloutStuck` | fewer of a Deployment's replicas run the current version than it wants (paused ones are ignored) | 15m |
+| `SpokeStatefulSetReplicasMismatch` | a StatefulSet has fewer ready replicas than it wants | 15m |
+| `SpokeStatefulSetRolloutStuck` | fewer of a StatefulSet's replicas run the current revision than it wants (an `OnDelete` or partitioned StatefulSet alerts here until its pods are replaced) | 15m |
+| `SpokeDaemonSetNotScheduled` | a DaemonSet has no pod on some of the nodes it should run on | 10m |
+| `SpokeDaemonSetPodsNotReady` | a DaemonSet has fewer ready pods than nodes it should run on | 15m |
+| `SpokeDaemonSetRolloutStuck` | fewer of a DaemonSet's pods run the current version than nodes it should run on | 15m |
 
 The hub's own pods have no `cluster` label, which is how these rules leave them out. The missing-metrics
 alert fires for any cluster in `fleet.clusters` that has no agent, so drop such clusters from the

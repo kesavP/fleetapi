@@ -1,5 +1,5 @@
 {{- if .Values.metricsIngest.enabled }}
-# Alerts on the pod and node metrics the spokes' agents remote-write to the
+# Alerts on the pod, node and workload metrics the spokes' agents remote-write to the
 # hub. Only series from a spoke carry a `cluster` label (the hub's own do not),
 # which is how these rules leave the hub's pods out. Alerts keep that label,
 # plus namespace and pod, so a receiver can say which pod on which cluster.
@@ -54,4 +54,71 @@ spec:
             summary: {{ printf "No pod metrics are arriving from cluster %s" .name | quote }}
             description: {{ printf "The metrics agent on cluster %s has stopped sending, or never started; check it and the hub's metrics-ingest." .name | quote }}
 {{- end }}
+    # Deployments, StatefulSets and DaemonSets on the spokes. Each compares what the
+    # workload asks for with what it has, matched on cluster, namespace and name, so
+    # one workload is one alert. A paused Deployment is left out: it is stopped on purpose.
+    - name: spoke-workloads
+      rules:
+        - alert: SpokeDeploymentReplicasMismatch
+          expr: |
+            (kube_deployment_spec_replicas{cluster!=""} > on (cluster, namespace, deployment) kube_deployment_status_replicas_available{cluster!=""})
+            unless on (cluster, namespace, deployment) (kube_deployment_spec_paused == 1)
+          for: {{ .Values.spokeMetrics.replicasMismatchFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Deployment {{ $labels.namespace }}/{{ $labels.deployment }} is missing replicas on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Deployment {{ $labels.namespace }}/{{ $labels.deployment }} on cluster {{ $labels.cluster }} wants {{ $value }} replicas but fewer are available.` | quote }}
+        - alert: SpokeDeploymentRolloutStuck
+          expr: |
+            (kube_deployment_status_replicas_updated{cluster!=""} < on (cluster, namespace, deployment) kube_deployment_spec_replicas{cluster!=""})
+            unless on (cluster, namespace, deployment) (kube_deployment_spec_paused == 1)
+          for: {{ .Values.spokeMetrics.rolloutStuckFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Rollout of Deployment {{ $labels.namespace }}/{{ $labels.deployment }} is stuck on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Only {{ $value }} replicas of Deployment {{ $labels.namespace }}/{{ $labels.deployment }} on cluster {{ $labels.cluster }} run the current version; the rollout is not progressing.` | quote }}
+        - alert: SpokeStatefulSetReplicasMismatch
+          expr: kube_statefulset_replicas{cluster!=""} > on (cluster, namespace, statefulset) kube_statefulset_status_replicas_ready{cluster!=""}
+          for: {{ .Values.spokeMetrics.replicasMismatchFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} is missing ready replicas on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} on cluster {{ $labels.cluster }} wants {{ $value }} replicas but fewer are ready.` | quote }}
+        # An OnDelete StatefulSet, or one with a partition, updates only some
+        # pods by design and alerts here until they are replaced.
+        - alert: SpokeStatefulSetRolloutStuck
+          expr: kube_statefulset_status_replicas_updated{cluster!=""} < on (cluster, namespace, statefulset) kube_statefulset_replicas{cluster!=""}
+          for: {{ .Values.spokeMetrics.rolloutStuckFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Rollout of StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} is stuck on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Only {{ $value }} replicas of StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} on cluster {{ $labels.cluster }} run the current revision; the rollout is not progressing.` | quote }}
+        - alert: SpokeDaemonSetNotScheduled
+          expr: kube_daemonset_status_desired_number_scheduled{cluster!=""} > on (cluster, namespace, daemonset) kube_daemonset_status_current_number_scheduled{cluster!=""}
+          for: {{ .Values.spokeMetrics.daemonSetNotScheduledFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} is not scheduled on every node of cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} on cluster {{ $labels.cluster }} should run on {{ $value }} nodes but has pods on fewer.` | quote }}
+        - alert: SpokeDaemonSetPodsNotReady
+          expr: kube_daemonset_status_desired_number_scheduled{cluster!=""} > on (cluster, namespace, daemonset) kube_daemonset_status_number_ready{cluster!=""}
+          for: {{ .Values.spokeMetrics.replicasMismatchFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} has pods that are not ready on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} on cluster {{ $labels.cluster }} should have {{ $value }} ready pods but has fewer.` | quote }}
+        - alert: SpokeDaemonSetRolloutStuck
+          expr: kube_daemonset_status_updated_number_scheduled{cluster!=""} < on (cluster, namespace, daemonset) kube_daemonset_status_desired_number_scheduled{cluster!=""}
+          for: {{ .Values.spokeMetrics.rolloutStuckFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: {{ `Rollout of DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} is stuck on cluster {{ $labels.cluster }}` | quote }}
+            description: {{ `Only {{ $value }} pods of DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} on cluster {{ $labels.cluster }} run the current version; the rollout is not progressing.` | quote }}
 {{- end }}
