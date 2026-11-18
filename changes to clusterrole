@@ -51,3 +51,30 @@ Things to know
 - make test-alerts fails as checked in: hack/platform-mvp/test-vmset-alerts.sh isn't executable in git (mode 100644), so the make target stops with "Permission denied". I ran the script with bash directly. git update-index --chmod=+x on it would fix the target.
 - Untracked file: there's a file in the repo root called changes to clusterrole. I didn't touch it.
 - Deploying: after upgrading the spoke chart, the kube-state-metrics pod has to restart to pick up the new --resources argument. helm upgrade does that because the pod spec changes.
+
+The new alerts won't show on the telemetry-ui Alerts page.
+
+What the Alerts page shows
+- The page reads /api/v1/projects/<project>/alerts. nginx sends that path to the telemetry-alerts service (server/app.js).
+- telemetry-alerts runs its own rules (src/alerts/) on a timer, against node-agent data it reads from telemetry-ingest (READ_API, server/config.js:41).
+- It can send what it finds to Alertmanager (ALERTMANAGER_URL, server/notify.js), but it never reads alerts back from Alertmanager or Prometheus. Nothing flows into the page from that side.
+
+Where the new alerts do show up
+
+The new Spoke* alerts are PrometheusRules evaluated by the hub Prometheus:
+
+spoke kube-state-metrics → metrics-agent → metrics-ingest → hub Prometheus (rules) → Alertmanager → alert-router
+
+You can see them in:
+- The hub Prometheus Alerts tab (port-forward to svc/hub-kube-prometheus-stack-prometheus 9090, then /alerts). It shows pending and firing alerts.
+- The Alertmanager UI (monitoring namespace, port 9093), once an alert fires.
+- Wherever alert-router delivers them. The routing test (hack/platform-mvp/test-alertmanager-config.sh) sends the existing Spoke* alerts to the alert-router receiver, and the new ones carry the same cluster, namespace and severity labels, so they should route the same way. I haven't run that test with the new alerts.
+- Grafana, through the Prometheus datasource, if you add an alert-list panel.
+
+Getting them onto the UI's Alerts page
+
+The page would need a second source, and there are two ways to add one:
+1. telemetry-alerts could also read Alertmanager's GET /api/v2/alerts, filtered by the project's cluster label, and merge the results into what it serves.
+2. Or the workload rules could be ported to telemetry-alerts. That doesn't work today, because the kube_* metrics go to Prometheus, not telemetry-ingest.
+
+Option 1 is the smaller change. It would need a mapping from project to cluster name, and the UI's key checks would still apply. I can sketch it if you want.
