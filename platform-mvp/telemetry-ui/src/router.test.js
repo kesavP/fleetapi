@@ -9,6 +9,29 @@ async function go(path, session) {
   return router.currentRoute.value
 }
 
+describe('the costs route', () => {
+  const ui = (costs) => ({ ready: Promise.resolve(), state: { costs, loaded: true } })
+  const goUi = async (path, u) => {
+    const router = createAppRouter(sessionOf({ project: 'p', key: 'k' }), createMemoryHistory(), u)
+    await router.push(path)
+    return router.currentRoute.value
+  }
+  it('is there where this UI offers it, and an unknown address where it does not', async () => {
+    expect((await goUi('/costs', ui(true))).name).toBe('costs')
+    expect((await goUi('/costs', ui(false))).fullPath).toBe('/applications')
+  })
+  it('waits for the file to be read before deciding', async () => {
+    let done
+    const u = { state: { costs: false, loaded: false }, ready: new Promise((r) => (done = r)) }
+    const router = createAppRouter(sessionOf({ project: 'p', key: 'k' }), createMemoryHistory(), u)
+    const pushed = router.push('/costs')
+    u.state.costs = true
+    done()
+    await pushed
+    expect(router.currentRoute.value.name).toBe('costs')
+  })
+})
+
 describe('routes', () => {
   it('sends "/" to the applications when connected, and to the connection page when not', async () => {
     expect((await go('/', sessionOf({ project: 'gke', key: 'k' }))).fullPath).toBe('/applications')
@@ -32,7 +55,7 @@ describe('routes', () => {
   it('has a page for each entry of the menu, a detail page for an application and a trace, and the connection', async () => {
     const s = sessionOf(null)
     for (const [path, name] of [
-      ['/applications', 'applications'], ['/recorded', 'recorded-incidents'], ['/recorded/vcxxe33p', 'recorded-incident'], ['/map', 'map'], ['/traces', 'traces'], ['/logs', 'logs'], ['/profiles', 'profiles'], ['/alerts', 'alerts'], ['/configuration/connection', 'connection'], ['/configuration/clickhouse', 'clickhouse'], ['/configuration/incidents', 'incident-rules'],
+      ['/applications', 'applications'], ['/recorded', 'recorded-incidents'], ['/configuration/rules', 'rules'], ['/recorded/vcxxe33p', 'recorded-incident'], ['/costs', 'costs'], ['/map', 'map'], ['/traces', 'traces'], ['/logs', 'logs'], ['/profiles', 'profiles'], ['/alerts', 'alerts'], ['/configuration/connection', 'connection'], ['/configuration/clickhouse', 'clickhouse'], ['/configuration/incidents', 'incident-rules'],
       [`/traces/${'a'.repeat(32)}`, 'trace'], ['/applications/x', 'application'],
     ]) {
       expect((await go(path, s)).name).toBe(name)

@@ -6,18 +6,18 @@ import SideNav from './SideNav.vue'
 import { createSession } from '../api/session'
 
 const stub = { template: '<i/>' }
-const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/incidents', '/incidents/:id', '/recorded', '/recorded/:id', '/recordedx', '/configuration/connection', '/configuration/clickhouse']
+const PATHS = ['/mapping', '/applications', '/applications/:name', '/map', '/traces', '/traces/:id', '/logs', '/profiles', '/alerts', '/incidents', '/incidents/:id', '/recorded', '/recorded/:id', '/recordedx', '/costs', '/configuration/connection', '/configuration/clickhouse']
 
 function memoryStorage() {
   const m = new Map()
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
 }
 
-async function mountNav({ at = '/applications', session = createSession(memoryStorage()), alerts = null, build = null } = {}) {
+async function mountNav({ at = '/applications', session = createSession(memoryStorage()), alerts = null, build = null, uiFeatures = null } = {}) {
   const router = createRouter({ history: createMemoryHistory(), routes: PATHS.map((path) => ({ path, component: stub })) })
   router.push(at)
   await router.isReady()
-  const w = mount(SideNav, { props: { session, alerts, build }, global: { plugins: [router] } })
+  const w = mount(SideNav, { props: { session, alerts, build, uiFeatures }, global: { plugins: [router] } })
   await flushPromises()
   return { w, router, session }
 }
@@ -39,6 +39,16 @@ describe('SideNav', () => {
       ['Incidents', '/incidents'],
     ])
     expect(w.get('nav').attributes('aria-label')).toBe('Main menu')
+  })
+
+  it('has a Costs entry only when this UI offers the costs', async () => {
+    const off = await mountNav({ uiFeatures: reactive({ state: { costs: false, loaded: true } }) })
+    expect(items(off.w).map((i) => i.text())).not.toContain('Costs')
+    const on = await mountNav({ uiFeatures: reactive({ state: { costs: true, loaded: true } }) })
+    const costs = items(on.w).find((i) => i.text() === 'Costs')
+    expect(costs.attributes('href')).toBe('/costs')
+    const none = await mountNav()
+    expect(items(none.w).map((i) => i.text())).not.toContain('Costs')
   })
 
   it('has no entry called Services: it is Applications now', async () => {

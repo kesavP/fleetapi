@@ -24,5 +24,6 @@ COPY --from=build /src/dist /usr/share/nginx/html
 # Only these two are substituted into the template: the nginx variables in it ($api, $uri, ...) stay as they are.
 ENV API_UPSTREAM=http://telemetry-ingest \
     ALERTS_UPSTREAM=http://telemetry-alerts \
-    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|ALERTS_UPSTREAM|NGINX_RESOLVER)$'
+    UI_COSTS=false \
+    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|ALERTS_UPSTREAM|UI_COSTS|NGINX_RESOLVER)$'
 EXPOSE 8080

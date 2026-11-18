@@ -6,9 +6,11 @@ import { APP, describeBuild } from '../version'
 
 // The main menu: a sidebar, one entry per page. The project it is connected to is at the bottom, with the way to change it.
 // Takes the session and alert store by injection so a test can hand it fakes.
-const props = defineProps({ session: { type: Object, default: null }, alerts: { type: Object, default: null }, build: { type: Object, default: null } })
+const props = defineProps({ session: { type: Object, default: null }, alerts: { type: Object, default: null }, uiFeatures: { type: Object, default: null }, build: { type: Object, default: null } })
 const session = props.session || inject('session')
 const alerts = props.alerts || inject('alerts', null)
+// What this UI deployment offers (telemetryUi.costs.enabled): the Costs entry is there only when it does. Whether the hub has the data is the page's to say.
+const uiFeatures = props.uiFeatures || inject('uiFeatures', null)
 // Which build this is, at the foot of the menu: so what is deployed can be read off the page (the same is served as /version.json).
 const info = describeBuild(props.build || APP)
 
@@ -20,7 +22,9 @@ const ITEMS = [
   { to: '/profiles', label: 'Profiles', icon: 'profiles' },
   { to: '/alerts', label: 'Alerts', icon: 'alerts', badge: true },
   { to: '/incidents', label: 'Incidents', icon: 'incidents', also: ['/recorded'] },
+  { to: '/costs', label: 'Costs', icon: 'costs', feature: 'costs' },
 ]
+const items = computed(() => ITEMS.filter((i) => !i.feature || (uiFeatures && uiFeatures.state[i.feature] === true)))
 
 // A page beneath a menu entry (an application, a trace) keeps its entry lit. Vue Router's own "active" class only follows nested
 // routes, and these are siblings, so it is decided from the address here.
@@ -62,7 +66,7 @@ function toggle() {
     </div>
 
     <nav aria-label="Main menu" class="menu">
-      <router-link v-for="i in ITEMS" :key="i.to" :to="i.to" class="item" :class="{ active: isActive(i.to, i.also) }" :aria-current="isActive(i.to, i.also) ? 'page' : null" :title="collapsed ? i.label : null">
+      <router-link v-for="i in items" :key="i.to" :to="i.to" class="item" :class="{ active: isActive(i.to, i.also) }" :aria-current="isActive(i.to, i.also) ? 'page' : null" :title="collapsed ? i.label : null">
         <AppIcon :name="i.icon" />
         <span class="label">{{ i.label }}</span>
         <span v-if="i.badge && firing.length" class="badge" :class="worst" :aria-label="`${firing.length} firing`">{{ firing.length }}</span>

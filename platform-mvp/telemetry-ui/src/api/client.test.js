@@ -239,6 +239,17 @@ describe('send: what a call that takes long or is answered by the service itself
     expect(e2.kind).toBe('timeout')
   })
 
+  it('says what the service says when a change is refused because the thing moved on, and has its own words when it says nothing', async () => {
+    const a = await clientWith(fakeFetch(409, { error: 'the rule has changed since it was read: it is now at version 3', current_version: 3 })).send('PUT', 'rules/rightsize.memory', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(a.status).toBe(409)
+    expect(a.kind).toBe('request')
+    expect(a.message).toBe('the rule has changed since it was read: it is now at version 3')
+    const b = await clientWith(fakeFetch(409, null)).send('PUT', 'rules/rightsize.memory', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(b.status).toBe(409)
+    expect(b.message).toContain('changed')
+    expect(b.message).not.toContain(MANAGE)
+  })
+
   it('passes on what the service says when IT answers 501 or 502, and keeps its own words when a proxy does', async () => {
     const a = await clientWith(fakeFetch(502, { error: 'Claude could not be reached or had a failure; try again' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
     expect(a.message).toBe('Claude could not be reached or had a failure; try again')

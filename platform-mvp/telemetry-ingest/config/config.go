@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/costs"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 )
 
@@ -78,6 +80,20 @@ type Config struct {
 	// low, over how many days and by which percentile is a RULE (see the rules package): RulesDefaults are the settings of a rule nobody has saved one
 	// for, and what a project saves overrides them. DetectRightsizeEvery is how often it looks (it reads days of metrics); DetectRightsizeExclude is
 	// the namespaces to leave out.
+	// Notifications: with an Alertmanager address, an incident the detector opens at NotifyMinSeverity or above is posted to it (see the notify package).
+	// NotifyUIURL, when set, makes each message link to the incident's page in the UI.
+	NotifyAlertmanagerURL string
+	NotifyMinSeverity     string
+	NotifyUIURL           string
+
+	// Costs: a FEATURE, off unless asked for. When on, the hub serves an infrastructure cost report (see the costs package) and says so in /features, so the UI
+	// shows its Costs page. Nodes are priced from CostPrices (an operator's prices, by instance type) and, for Azure and when CostsAzurePrices is on, from
+	// the public Azure price list. CostsVCPUGBRatio is how many GiB of memory cost as much as one core, which splits a node's price between them.
+	Costs            bool
+	CostsAzurePrices bool
+	CostsVCPUGBRatio float64
+	CostPrices       map[string]costs.Override
+
 	DetectRightsize        bool
 	DetectRightsizeEvery   time.Duration
 	DetectRightsizeExclude string
@@ -98,7 +114,7 @@ func Parse(args []string) (Config, error) {
 	fs.SetOutput(io.Discard)
 
 	var c Config
-	var addrs, passwordFile, analysisKeyFile, rulesDefaults string
+	var addrs, passwordFile, analysisKeyFile, rulesDefaults, costPrices string
 	fs.StringVar(&c.Listen, "listen", ":8080", "Address for the HTTP ingest and query API")
 	fs.StringVar(&c.GRPCListen, "grpc-listen", ":4317", "Address for OTLP/gRPC traces and logs (empty = disabled)")
 	fs.StringVar(&c.ProjectsFile, "projects-file", "", "JSON file mapping projects to ingest and read API keys (required)")
@@ -134,6 +150,13 @@ func Parse(args []string) (Config, error) {
 	fs.Float64Var(&c.DetectDepsShare, "detect-deps-share", 0.2, "The share of connection attempts into an application that must fail for it to count (0 to 1)")
 	fs.Float64Var(&c.DetectDepsMinFailed, "detect-deps-min-failed", 5, "Failed connections into an application, in five minutes, before their share means anything")
 	fs.StringVar(&c.DetectDepsExclude, "detect-deps-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose applications are not judged for failing connections; empty = none")
+	fs.StringVar(&c.NotifyAlertmanagerURL, "notify-alertmanager-url", "", "Alertmanager's address (such as http://alertmanager:9093): an incident the detector opens is posted to it, once, when it opens (empty = nobody is told)")
+	fs.StringVar(&c.NotifyMinSeverity, "notify-min-severity", "warning", "The lowest severity that is told: critical, warning or info")
+	fs.StringVar(&c.NotifyUIURL, "notify-ui-url", "", "The UI's address (such as https://telemetry.example), so each message links to the incident's page; empty = no link")
+	fs.BoolVar(&c.Costs, "costs", false, "Serve the infrastructure cost report, and tell the UI to show its Costs page")
+	fs.BoolVar(&c.CostsAzurePrices, "costs-azure-prices", true, "Price Azure nodes from Azure's public price list (the hub then needs to reach prices.azure.com); an override always wins")
+	fs.Float64Var(&c.CostsVCPUGBRatio, "costs-vcpu-gb-ratio", 7.5, "How many GiB of memory cost as much as one core: splits a node's price between its CPU and its memory")
+	fs.StringVar(&costPrices, "costs-prices", "", `JSON object of instance type to its price per hour, such as {"Standard_D4s_v6":{"hourly":0.25,"spotHourly":0.07}}; wins over the price list`)
 	fs.BoolVar(&c.DetectRightsize, "detect-rightsize", false, "Also open an incident for a container that uses far less of its memory, CPU or volume than it was given (the rules decide how low)")
 	fs.DurationVar(&c.DetectRightsizeEvery, "detect-rightsize-every", time.Hour, "How often to look for over-provisioned containers (at least 10m): each look reads days of metrics")
 	fs.StringVar(&c.DetectRightsizeExclude, "detect-rightsize-exclude", DefaultSilenceExclude, "Namespaces (a regular expression) whose containers are not judged for right-sizing; empty = none")
@@ -176,6 +199,14 @@ func Parse(args []string) (Config, error) {
 	if c.RulesDefaults, err = rules.ParseDefaults(rulesDefaults); err != nil {
 		return Config{}, err
 	}
+	if c.Costs {
+		if c.CostPrices, err = costs.ParseOverrides(costPrices); err != nil {
+			return Config{}, err
+		}
+		if !(c.CostsVCPUGBRatio > 0 && c.CostsVCPUGBRatio <= 100) {
+			return Config{}, fmt.Errorf("costs-vcpu-gb-ratio must be above 0 and at most 100")
+		}
+	}
 
 	switch {
 	case c.ProjectsFile == "":
@@ -212,6 +243,12 @@ func Parse(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("detect-deps-min-failed must be positive")
 	case c.DetectDeps && c.DetectDepsExclude != "" && !validRegexp(c.DetectDepsExclude):
 		return Config{}, fmt.Errorf("detect-deps-exclude is not a valid regular expression")
+	case c.NotifyAlertmanagerURL != "" && !webAddress(c.NotifyAlertmanagerURL):
+		return Config{}, fmt.Errorf("notify-alertmanager-url must be an http or https address, such as http://alertmanager:9093")
+	case c.NotifyAlertmanagerURL != "" && c.NotifyMinSeverity != "critical" && c.NotifyMinSeverity != "warning" && c.NotifyMinSeverity != "info":
+		return Config{}, fmt.Errorf("notify-min-severity must be critical, warning or info")
+	case c.NotifyAlertmanagerURL != "" && c.NotifyUIURL != "" && !webAddress(c.NotifyUIURL):
+		return Config{}, fmt.Errorf("notify-ui-url must be an http or https address, such as https://telemetry.example")
 	case c.DetectRightsize && c.DetectRightsizeEvery < 10*time.Minute:
 		return Config{}, fmt.Errorf("detect-rightsize-every must be at least 10m: each look reads days of metrics")
 	case c.DetectRightsize && c.DetectRightsizeExclude != "" && !validRegexp(c.DetectRightsizeExclude):
@@ -225,6 +262,12 @@ func Parse(args []string) (Config, error) {
 }
 
 // identifier guards the one value that is spliced into SQL text.
+// webAddress is an http or https address with a host.
+func webAddress(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
 var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
 
 func identifier(s string) bool {

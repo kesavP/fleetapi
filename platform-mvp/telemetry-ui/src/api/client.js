@@ -132,6 +132,9 @@ export function createClient({ session, fetchImpl = (...a) => fetch(...a), base 
         throw new ApiError(detail || 'Not found.', { status: 404, kind: 'request' })
       case 405:
         throw new ApiError('The UI\'s proxy does not let this through. Is the UI image older than the service?', { status: 405, kind: 'request' })
+      case 409:
+        // a change that was based on an older version than the service has: it says which version it is at
+        throw new ApiError(detail || 'It has changed since it was read: look again, then change it.', { status: 409, kind: 'request' })
       case 413:
         throw new ApiError('The request was too large.', { status: 413, kind: 'request' })
       case 429:

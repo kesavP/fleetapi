@@ -29,6 +29,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/golang/snappy"
 	"github.com/google/pprof/profile"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/costs"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
@@ -2050,5 +2051,76 @@ func TestRightsizeFromASavedRuleOnStoredGauges(t *testing.T) {
 	run2.Now = func() time.Time { return now.Add(2 * time.Hour) }
 	if n, err = run2.Project(ctx, "us"); err != nil || n != 0 {
 		t.Fatalf("a later look opened %d, err %v", n, err)
+	}
+}
+
+// The cost report on what the node-agent stores: counters read as rates, gauges averaged, containers placed on nodes by machine_id, and a node priced.
+func TestCostReportOnStoredNodeAndContainerMetrics(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Minute)
+	const machine, host = "machine-one-0000", "aks-n1"
+	web := "/k8s/shop/web-5d6f8c7b9-xk2lp/app"
+	var series []model.Series
+	var samples []model.Sample
+	var hash uint64
+	add := func(name string, labels map[string]string, value func(at time.Time, n int) float64) {
+		hash++
+		series = append(series, model.Series{Project: "us", Name: name, Hash: hash, Labels: labels, Seen: now})
+		n := 0
+		for at := now.Add(-100 * time.Minute); !at.After(now); at = at.Add(15 * time.Second) {
+			samples = append(samples, model.Sample{Project: "us", Name: name, Hash: hash, Time: at, Value: value(at, n)})
+			n++
+		}
+	}
+	gauge := func(v float64) func(time.Time, int) float64 { return func(time.Time, int) float64 { return v } }
+	counter := func(perSecond float64) func(time.Time, int) float64 {
+		return func(_ time.Time, n int) float64 { return perSecond * 15 * float64(n) }
+	}
+	const gib = float64(1 << 30)
+	add("node_cloud_info", map[string]string{"machine_id": machine, "provider": "Azure", "region": "SouthIndia", "instance_type": "Standard_D4s_v6", "instance_life_cycle": ""}, gauge(1))
+	add("node_info", map[string]string{"machine_id": machine, "hostname": host}, gauge(1))
+	add("node_resources_cpu_logical_cores", map[string]string{"machine_id": machine}, gauge(4))
+	add("node_resources_memory_total_bytes", map[string]string{"machine_id": machine}, gauge(16*gib))
+	add("node_resources_memory_available_bytes", map[string]string{"machine_id": machine}, gauge(12*gib))
+	for mode, rate := range map[string]float64{"idle": 3.0, "user": 0.6, "system": 0.2, "iowait": 0.1} {
+		add("node_resources_cpu_usage_seconds_total", map[string]string{"machine_id": machine, "mode": mode}, counter(rate))
+	}
+	add("container_resources_cpu_usage_seconds_total", map[string]string{"machine_id": machine, "container_id": web}, counter(0.3))
+	add("container_resources_memory_rss_bytes", map[string]string{"machine_id": machine, "container_id": web}, gauge(1*gib))
+	if err := r.st.WriteSeries(ctx, series); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.WriteSamples(ctx, samples); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &costs.Collector{
+		Source: r.st, Prices: &costs.Prices{Overrides: map[string]costs.Override{"Standard_D4s_v6": {Hourly: 0.20}}}, Opts: costs.Options{VCPUGBRatio: 7.5},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), MaxSeries: 100,
+	}
+	rep, err := c.Report(ctx, "us", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Nodes) != 1 || rep.HasRequests {
+		t.Fatalf("report = %+v", rep)
+	}
+	n := rep.Nodes[0]
+	if n.Name != host || n.CPU.Capacity != 4 || math.Abs(n.CPU.Usage-0.8) > 0.02 || math.Abs(n.Memory.Usage-4*gib) > 1 {
+		t.Fatalf("node = %+v: the counters are rates, and iowait and idle are not use", n)
+	}
+	if n.PriceMonthly == nil || math.Abs(*n.PriceMonthly-146) > 1e-6 || n.Lifecycle != "on-demand" || !n.LifecycleAssumed {
+		t.Fatalf("price = %v %q %v", n.PriceMonthly, n.Lifecycle, n.LifecycleAssumed)
+	}
+	if len(rep.Applications) != 1 || rep.Applications[0].App != "/k8s/shop/web" || math.Abs(rep.Applications[0].CPU.Usage-0.3) > 0.02 || math.Abs(rep.Applications[0].Memory.Usage-gib) > 1 {
+		t.Fatalf("applications = %+v", rep.Applications)
+	}
+	if rep.Totals.IdleMonthly <= 0 || math.Abs(rep.Totals.UsedMonthly+rep.Totals.IdleMonthly-146) > 0.01 {
+		t.Fatalf("totals = %+v: without requests what is not used is idle", rep.Totals)
+	}
+	// another project has none of it
+	if other, err := c.Report(ctx, "eu", 3600); err != nil || len(other.Nodes) != 0 {
+		t.Fatalf("eu: %+v %v", other.Nodes, err)
 	}
 }

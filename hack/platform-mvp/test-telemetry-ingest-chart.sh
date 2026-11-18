@@ -166,6 +166,42 @@ assert d["rightsize.memory"]["percent"] == 30 and d["rightsize.storage"]["enable
 PY
 echo "ok: right-sizing flags appear only when it is on (and detection is); rule defaults reach the service as one JSON flag, and only when given"
 
+echo "== infrastructure costs: a feature, nothing is passed unless it is on"
+grep -q -- "--costs" <<<"$det" && fail "a --costs flag rendered with costs off: an image without it would not start"
+cs="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set telemetryIngest.costs.azurePrices=false --set telemetryIngest.costs.vcpuGbRatio=6)"
+for want in "- --costs" "--costs-azure-prices=false" "--costs-vcpu-gb-ratio=6"; do
+  grep -qF -- "$want" <<<"$cs" || fail "$want missing with costs on"
+done
+grep -q -- "--costs-prices" <<<"$cs" && fail "prices were passed on that were not given"
+cp="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set 'telemetryIngest.costs.prices.Standard_D4s_v6.hourly=0.25' --set 'telemetryIngest.costs.prices.Standard_D4s_v6.spotHourly=0.07')"
+python3 - "$cp" <<'PY'
+import sys, json, re
+m = re.search(r'--costs-prices=(\{.*\})"', sys.argv[1].replace('\\"', '"'))
+assert m, "no costs-prices"
+d = json.loads(m.group(1))
+assert d["Standard_D4s_v6"] == {"hourly": 0.25, "spotHourly": 0.07}, d
+PY
+grep -q -- "--costs-azure-prices=true" <<<"$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true)" || fail "Azure prices are not on by default"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set telemetryIngest.costs.vcpuGbRatio=0 2>&1 || true)"
+grep -q "vcpuGbRatio must be above 0" <<<"$out" || fail "a ratio of zero was not refused: $out"
+echo "ok: the costs flags appear only when it is on; prices pass as one JSON flag, and only when given"
+
+echo "== telling Alertmanager of incidents: nothing unless switched on (and detection is), the chart's own Alertmanager is the default"
+grep -q -- "--notify-" <<<"$det" && fail "a --notify- flag rendered with detection on but notifications off: an image without it would not start"
+nf="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set telemetryIngest.notify.alertmanagerUrl=http://am.example:9093 --set telemetryIngest.notify.minSeverity=critical --set telemetryIngest.notify.uiUrl=https://ui.example)"
+for want in '--notify-alertmanager-url=http://am.example:9093' '--notify-min-severity=critical' '--notify-ui-url=https://ui.example'; do
+  grep -qF -- "$want" <<<"$nf" || fail "$want missing with notifications on"
+done
+own="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true)"
+grep -qF -- '--notify-alertmanager-url=http://alertmanager.monitoring.svc.cluster.local:9093' <<<"$own" || fail "the chart's own Alertmanager is not the default: $(grep notify <<<"$own")"
+grep -qF -- '--notify-ui-url' <<<"$own" && fail "a UI address was passed on that was not given"
+render --set telemetryIngest.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true | grep -q -- "--notify-" && fail "notification flags rendered while detection itself is off"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true 2>&1 || true)"
+grep -q "notify needs an Alertmanager" <<<"$out" || fail "notifications with no Alertmanager were not refused: $out"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true --set telemetryIngest.notify.minSeverity=urgent 2>&1 || true)"
+grep -q "must be critical, warning or info" <<<"$out" || fail "a severity that does not exist was not refused: $out"
+echo "ok: notification flags appear only when on (and detection is), pointing at the chart's Alertmanager unless another is named"
+
 echo "== analysis with Claude: nothing unless it is switched on, then a Secret mounted as a file"
 off="$(render --set telemetryIngest.enabled=true)"
 for needle in "--analysis-" "anthropic-key" "/etc/telemetry/anthropic"; do

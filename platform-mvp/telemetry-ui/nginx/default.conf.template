@@ -2,6 +2,7 @@
 #   ${API_UPSTREAM}    where /api goes: scheme and host, no path (default http://telemetry-ingest)
 #   ${ALERTS_UPSTREAM} where /api/v1/projects/<project>/alerts goes (default http://telemetry-alerts): the alert service, which
 #                      answers with the same read keys. If it is not deployed that path answers 502 and the page checks for itself.
+#   ${UI_COSTS}        true or false: whether this UI offers the Costs page (served as /ui-features.json, see below)
 #   ${NGINX_RESOLVER}  the name servers, from /etc/resolv.conf (see 05-resolver.envsh)
 # One path of the read API belongs to another service. A map is how nginx picks an upstream by path while keeping one location.
 map $uri $api_target {
@@ -10,8 +11,8 @@ map $uri $api_target {
 }
 
 # Which methods a path of the API takes through the UI. Reads (GET, HEAD) everywhere; and two writes: on a project's ENROLLMENTS, making one (POST)
-# and revoking one (DELETE); and asking for an ANALYSIS of one incident (POST .../incidents/<id>/analysis: it only adds a comment by "claude").
-# Every other write the service has (changing an incident, for one) stays closed here. $uri is the decoded, normalised path, so
+# and revoking one (DELETE); asking for an ANALYSIS of one incident (POST .../incidents/<id>/analysis: it only adds a comment by "claude"); and saving
+# one of the three RULES (PUT .../rules/rightsize.memory, .cpu or .storage). Every other write the service has (changing an incident, for one) stays closed here. $uri is the decoded, normalised path, so
 # "enrollments/../incidents" is the incidents path and gets no writes. What a write needs is a manage key in the X-API-Key header, which the
 # page asks for each time and does not keep.
 map "$request_method $uri" $method_ok {
@@ -19,6 +20,7 @@ map "$request_method $uri" $method_ok {
     ~^(GET|HEAD)\s 1;
     "~^(POST|DELETE)\s/api/v1/projects/[^/]+/enrollments(/[0-9a-f]{12})?$" 1;   # quoted: nginx reads a { in a regex as syntax
     "~^POST\s/api/v1/projects/[^/]+/incidents/[a-z0-9]{8}/analysis$" 1;
+    "~^PUT\s/api/v1/projects/[^/]+/rules/rightsize\.(memory|cpu|storage)$" 1;
 }
 
 server {
@@ -43,6 +45,14 @@ server {
         access_log off;
         default_type text/plain;
         return 200 "ok\n";
+    }
+
+    # Which optional pages this deployment offers, from the environment: the page reads it to decide on its menu entry and route.
+    location = /ui-features.json {
+        include /etc/nginx/snippets/security-headers.conf;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 200 '{"costs":${UI_COSTS}}';
     }
 
     # The read API, and nothing else of the service. GET only, but for enrolling a cluster (see $method_ok above). The key arrives in the

@@ -171,6 +171,27 @@ telemetryIngest:
   # Secret you make; each call costs what the model costs, and one incident is analysed at most every two minutes.
   #   kubectl -n monitoring create secret generic anthropic-api-key --from-literal=apiKey=<key>
   # Nothing is passed to the service while this is off, so an image without it still starts.
+  # Tell people when the detector opens an incident: it is posted to Alertmanager once, when it opens (see `alertmanager` below for one that sends to
+  # Slack). Only warning and critical by default, so the information-only incidents (over-provisioned containers) are never a message. `alertmanagerUrl`
+  # defaults to the chart's own Alertmanager when that is on, and is required otherwise. `uiUrl` makes each message link to the incident's page in the
+  # UI, and is left out when empty. Nothing is passed to the service while this is off, so an image without it still starts.
+  notify:
+    enabled: false
+    alertmanagerUrl: ""
+    minSeverity: warning # critical, warning or info
+    uiUrl: ""
+  # The infrastructure cost report (the UI's Costs page): what the nodes cost, what the money is for (used, requested and not used, requested by nobody) and where it is
+  # wasted. It is a FEATURE, off by default: while it is off the hub answers 404 for the report and the UI shows no Costs page. Nodes are priced from `prices` (your
+  # own price per hour by instance type, which wins) and, for Azure and when `azurePrices` is on, from Azure's public price list, which the hub then needs to reach
+  # (prices.azure.com, HTTPS). These are LIST prices: reservations and discounts make the real ones lower, so set `prices` to what you pay. Cloud nodes do not say
+  # whether they are spot, so every node is priced as on-demand; give a spot node's type a `spotHourly` and set its lifecycle if you know. What pods REQUEST comes
+  # from the cluster collector: without it the page shows usage and idle only. `vcpuGbRatio` is how many GiB of memory cost as much as one core (7.5 is about what
+  # the clouds charge) and splits a node's price between its CPU and its memory. Nothing is passed to the service while this is off.
+  costs:
+    enabled: false
+    azurePrices: true
+    vcpuGbRatio: 7.5
+    prices: {} # for example { Standard_D4s_v6: { hourly: 0.25, spotHourly: 0.07 } }
   # The settings a rule has until a project saves its own (GET/PUT /api/v1/projects/<project>/rules): only what differs from the built-in defaults, which are
   # memory and CPU on at 50% over 7 days judged by the 95th percentile of use, and storage off. For example
   #   defaults: { rightsize.memory: { percent: 40 }, rightsize.storage: { enabled: true } }
@@ -253,6 +274,9 @@ telemetryUi:
   apiUpstream: ""
   # Where the alerts path goes. Empty: the telemetry-alerts Service.
   alertsUpstream: ""
+  # The Costs page: false (the default) leaves it out of the menu and the routes. The hub has its own switch, telemetryIngest.costs.enabled.
+  costs:
+    enabled: false
   service:
     type: ClusterIP
     nodePort: 30082
@@ -295,6 +319,38 @@ telemetryAlerts:
   resources:
     requests: { cpu: 20m, memory: 64Mi }
     limits: { cpu: 300m, memory: 192Mi }
+
+# An Alertmanager that tells people: it takes the alerts the alert service (telemetryAlerts) sends it, and the incidents the hub's detector opens
+# (telemetryIngest.notify), and posts them to Slack. It is a plain single pod with nothing to install first (no operator, no CRDs): the config is
+# rendered here, and the Slack incoming-webhook URL, which is a secret, is read from a Secret you make:
+#   kubectl -n monitoring create secret generic alertmanager-slack --from-literal=webhook=https://hooks.slack.com/services/...
+# Alerts that are still firing are grouped and repeated every `repeatInterval`; an incident is told ONCE, when it opens (nothing here resolves it, so no
+# "resolved" follows it). Silences and the log of what was sent live in the pod's memory-backed volume: they are lost when the pod is replaced.
+# When this is on and telemetryAlerts.alertmanagerUrl is empty, the alert service sends to it.
+alertmanager:
+  enabled: false
+  namespace: monitoring
+  image:
+    repository: quay.io/prometheus/alertmanager
+    tag: v0.27.0
+    pullPolicy: IfNotPresent
+  # Numeric UID of the image's non-root user (nobody).
+  runAsUser: 65534
+  slack:
+    existingSecret: alertmanager-slack
+    secretKey: webhook
+    # Only for a webhook that lets the message pick its channel (a legacy one); an app's incoming webhook ignores it.
+    channel: ""
+    # Say when an alert that was firing has stopped (alerts from the alert service only; an incident is never "resolved" here).
+    sendResolved: true
+  route:
+    groupBy: [alertname, project]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
 
 # Receives the spokes' pod metrics. Each spoke runs a Prometheus agent that
 # remote-writes here; this proxy is the only way in, so the hub Prometheus is

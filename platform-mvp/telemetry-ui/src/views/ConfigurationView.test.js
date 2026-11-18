@@ -7,6 +7,7 @@ const tabStub = { template: '<div class="ch-stub" />' }
 const rulesStub = { template: '<div class="rules-stub" />' }
 const connStub = { template: '<div class="conn-stub" />' }
 const clustersStub = { template: '<div class="clusters-stub" />' }
+const hubRulesStub = { template: '<div class="hub-rules-stub" />' }
 async function mountAt(path) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -14,12 +15,13 @@ async function mountAt(path) {
       { path: '/configuration/connection', name: 'connection', component: ConfigurationView, meta: { tab: 'connection' } },
       { path: '/configuration/clusters', name: 'clusters', component: ConfigurationView, meta: { tab: 'clusters' } },
       { path: '/configuration/incidents', name: 'incident-rules', component: ConfigurationView, meta: { tab: 'incidents' } },
+      { path: '/configuration/rules', name: 'rules', component: ConfigurationView, meta: { tab: 'rules' } },
       { path: '/configuration/clickhouse', name: 'clickhouse', component: ConfigurationView, meta: { tab: 'clickhouse' } },
     ],
   })
   router.push(path)
   await router.isReady()
-  const w = mount(ConfigurationView, { global: { plugins: [router], stubs: { ClickHouseTab: tabStub, ConnectionView: connStub, IncidentSettingsTab: rulesStub, ClustersTab: clustersStub } } })
+  const w = mount(ConfigurationView, { global: { plugins: [router], stubs: { ClickHouseTab: tabStub, ConnectionView: connStub, IncidentSettingsTab: rulesStub, ClustersTab: clustersStub, RulesTab: hubRulesStub } } })
   await flushPromises()
   return { w, router }
 }
@@ -28,7 +30,7 @@ describe('ConfigurationView', () => {
   it('has a Connection and a ClickHouse tab, and shows the connection one at /configuration/connection', async () => {
     const { w } = await mountAt('/configuration/connection')
     expect(w.get('h1').text()).toBe('Configuration')
-    expect(w.findAll('.tab').map((t) => t.text())).toEqual(['Connection', 'Clusters', 'Incidents', 'ClickHouse'])
+    expect(w.findAll('.tab').map((t) => t.text())).toEqual(['Connection', 'Clusters', 'Incidents', 'Rules', 'ClickHouse'])
     expect(w.findAll('.tab.active').map((t) => t.text())).toEqual(['Connection'])
     expect(w.find('.conn-stub').exists()).toBe(true)
     expect(w.find('.ch-stub').exists()).toBe(false)
@@ -57,9 +59,17 @@ describe('ConfigurationView', () => {
     expect(w.findAll('.tab.active').map((t) => t.text())).toEqual(['Incidents'])
   })
 
+  it('shows the hub\'s rules at /configuration/rules, apart from the incident rules that are kept in the browser', async () => {
+    const { w } = await mountAt('/configuration/rules')
+    expect(w.find('.hub-rules-stub').exists()).toBe(true)
+    expect(w.find('.rules-stub').exists()).toBe(false)
+    expect(w.find('.conn-stub').exists()).toBe(false)
+    expect(w.findAll('.tab.active').map((t) => t.text())).toEqual(['Rules'])
+  })
+
   it('switches tab by link', async () => {
     const { w, router } = await mountAt('/configuration/connection')
-    await w.findAll('.tab')[3].trigger('click')
+    await w.findAll('.tab')[4].trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/configuration/clickhouse')
     expect(w.find('.ch-stub').exists()).toBe(true)

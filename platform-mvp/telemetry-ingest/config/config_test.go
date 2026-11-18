@@ -243,3 +243,65 @@ func TestRightsizeAndRulesSettings(t *testing.T) {
 		t.Errorf("a setting of a switched-off check was refused: %v", err)
 	}
 }
+
+func TestNotificationSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyAlertmanagerURL != "" || c.NotifyMinSeverity != "warning" || c.NotifyUIURL != "" {
+		t.Fatalf("defaults = %q %q %q: nobody is told unless an address is given", c.NotifyAlertmanagerURL, c.NotifyMinSeverity, c.NotifyUIURL)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--notify-alertmanager-url", "http://alertmanager.monitoring.svc:9093", "--notify-min-severity", "critical", "--notify-ui-url", "https://ui.example"})
+	if err != nil || c.NotifyAlertmanagerURL != "http://alertmanager.monitoring.svc:9093" || c.NotifyMinSeverity != "critical" || c.NotifyUIURL != "https://ui.example" {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	for name, args := range map[string][]string{
+		"an address that is not http":    {"--notify-alertmanager-url", "ftp://am:9093"},
+		"an address with no host":        {"--notify-alertmanager-url", "http://"},
+		"an address that is no address":  {"--notify-alertmanager-url", "alertmanager"},
+		"a severity that does not exist": {"--notify-alertmanager-url", "http://am:9093", "--notify-min-severity", "urgent"},
+		"a UI address that is not http":  {"--notify-alertmanager-url", "http://am:9093", "--notify-ui-url", "javascript:alert(1)"},
+		"a UI address with a space":      {"--notify-alertmanager-url", "http://am:9093", "--notify-ui-url", "http://ui example"},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// without an address nothing is used, so a value left in a chart cannot stop the service
+	if _, err := Parse([]string{"--projects-file", "p.json", "--notify-min-severity", "urgent", "--notify-ui-url", "nonsense"}); err != nil {
+		t.Errorf("a setting of a switched-off feature was refused: %v", err)
+	}
+	if c, err = Parse([]string{"--projects-file", "p.json", "--notify-alertmanager-url", "http://am:9093", "--notify-ui-url", ""}); err != nil || c.NotifyUIURL != "" {
+		t.Errorf("an empty UI address (no links) is allowed: %v", err)
+	}
+}
+
+func TestCostSettings(t *testing.T) {
+	c, err := Parse([]string{"--projects-file", "p.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Costs || !c.CostsAzurePrices || c.CostsVCPUGBRatio != 7.5 || len(c.CostPrices) != 0 {
+		t.Fatalf("defaults = %v %v %v %v: the costs are a feature, and off unless asked for", c.Costs, c.CostsAzurePrices, c.CostsVCPUGBRatio, c.CostPrices)
+	}
+	c, err = Parse([]string{"--projects-file", "p.json", "--costs", "--costs-azure-prices=false", "--costs-vcpu-gb-ratio", "6", "--costs-prices", `{"Standard_D4s_v6":{"hourly":0.25,"spotHourly":0.07}}`})
+	if err != nil || !c.Costs || c.CostsAzurePrices || c.CostsVCPUGBRatio != 6 || c.CostPrices["Standard_D4s_v6"].SpotHourly != 0.07 {
+		t.Fatalf("set: %v %+v", err, c)
+	}
+	for name, args := range map[string][]string{
+		"prices that are not JSON": {"--costs-prices", "{"},
+		"a price of zero":          {"--costs-prices", `{"x":{"hourly":0}}`},
+		"a ratio of zero":          {"--costs-vcpu-gb-ratio", "0"},
+		"a negative ratio":         {"--costs-vcpu-gb-ratio", "-1"},
+		"a ratio that is huge":     {"--costs-vcpu-gb-ratio", "1000"},
+	} {
+		if _, err := Parse(append([]string{"--projects-file", "p.json", "--costs"}, args...)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// settings of a switched-off feature are not checked, so a value left in a chart cannot stop the service
+	if _, err := Parse([]string{"--projects-file", "p.json", "--costs-prices", "{", "--costs-vcpu-gb-ratio", "0"}); err != nil {
+		t.Errorf("a setting of a switched-off feature was refused: %v", err)
+	}
+}

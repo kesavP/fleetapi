@@ -14,7 +14,7 @@ import RecordedIncidentsView from './views/RecordedIncidentsView.vue'
 import RecordedIncidentView from './views/RecordedIncidentView.vue'
 
 // Where "/" goes depends on whether there is a connection: to the applications if so, else to the page that makes one.
-export function makeRoutes(session) {
+export function makeRoutes(session, uiFeatures = null) {
   const home = () => (session && session.get() ? '/applications' : '/configuration/connection')
   return [
     { path: '/', name: 'home', redirect: home },
@@ -24,6 +24,8 @@ export function makeRoutes(session) {
     { path: '/configuration/clusters', name: 'clusters', component: ConfigurationView, meta: { tab: 'clusters' } },
     { path: '/configuration/clickhouse', name: 'clickhouse', component: ConfigurationView, meta: { tab: 'clickhouse' } },
     { path: '/configuration/incidents', name: 'incident-rules', component: ConfigurationView, meta: { tab: 'incidents' } },
+    // The detectors' rules, kept on the hub (the Incidents tab above keeps its own in this browser).
+    { path: '/configuration/rules', name: 'rules', component: ConfigurationView, meta: { tab: 'rules' } },
     { path: '/connection', redirect: '/configuration/connection' },
     { path: '/applications', name: 'applications', component: ApplicationsView },
     { path: '/applications/:name', name: 'application', component: ServiceView },
@@ -41,10 +43,22 @@ export function makeRoutes(session) {
     // The incidents the hub has recorded (its detector's, and people's through the API), apart from the ones /incidents works out from the metrics.
     { path: '/recorded', name: 'recorded-incidents', component: RecordedIncidentsView },
     { path: '/recorded/:id', name: 'recorded-incident', component: RecordedIncidentView },
+    // The infrastructure costs: a feature the hub switches on (the page itself says so when it is off).
+    // Its own chunk (read only when the page is opened), and only where this UI offers it: otherwise "/costs" is an unknown address.
+    {
+      path: '/costs',
+      name: 'costs',
+      component: () => import('./views/CostsView.vue'),
+      beforeEnter: async () => {
+        if (!uiFeatures) return true
+        await uiFeatures.ready
+        return uiFeatures.state.costs ? true : '/'
+      },
+    },
     { path: '/:rest(.*)*', redirect: '/' },
   ]
 }
 
-export function createAppRouter(session, history = createWebHistory(import.meta.env.BASE_URL)) {
-  return createRouter({ history, routes: makeRoutes(session) })
+export function createAppRouter(session, history = createWebHistory(import.meta.env.BASE_URL), uiFeatures = null) {
+  return createRouter({ history, routes: makeRoutes(session, uiFeatures) })
 }

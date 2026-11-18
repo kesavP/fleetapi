@@ -18,9 +18,11 @@ import (
 
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/analysis"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/config"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/costs"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/notify"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
@@ -149,6 +151,17 @@ func main() {
 	inc.Register(mux)
 	ruleSet := rules.NewManager(s.Rules(), cfg.RulesDefaults)
 	(&server.Rules{Projects: reg, Manager: ruleSet, Log: log}).Register(mux)
+	// The costs are a feature: /features always says whether they are on, and /costs answers only when they are.
+	costAPI := &server.Costs{Projects: reg, Enabled: cfg.Costs, Log: log}
+	if cfg.Costs {
+		prices := &costs.Prices{Overrides: cfg.CostPrices}
+		if cfg.CostsAzurePrices {
+			prices.Azure = &costs.AzureRetail{}
+		}
+		costAPI.Reporter = &costs.Collector{Source: s, Prices: prices, Opts: costs.Options{VCPUGBRatio: cfg.CostsVCPUGBRatio}, Log: log, MaxSeries: 5000}
+		log.Info("infrastructure costs on", "azure_prices", cfg.CostsAzurePrices, "price_overrides", len(cfg.CostPrices))
+	}
+	costAPI.Register(mux)
 	if cfg.DetectInterval > 0 {
 		dc := detect.Defaults()
 		dc.Availability, dc.Latency, dc.LatencySeconds, dc.BurnThreshold = cfg.DetectAvailability, cfg.DetectLatency, cfg.DetectLatencySeconds, cfg.DetectBurn
@@ -168,6 +181,13 @@ func main() {
 			if cfg.DetectDepsExclude != "" {
 				r.DepsExclude = regexp.MustCompile(cfg.DetectDepsExclude) // checked by config.Parse
 			}
+		}
+		if cfg.NotifyAlertmanagerURL != "" {
+			// an incident the detector opens is told to Alertmanager, in the background and best effort (see the notify package)
+			r.Incidents = notify.Wrap(incidents, &notify.Alertmanager{
+				URL: cfg.NotifyAlertmanagerURL, UIURL: cfg.NotifyUIURL, MinSeverity: incident.Severity(cfg.NotifyMinSeverity), Log: log,
+			})
+			log.Info("telling Alertmanager of incidents", "url", cfg.NotifyAlertmanagerURL, "min_severity", cfg.NotifyMinSeverity)
 		}
 		if cfg.DetectRightsize {
 			r.Rightsize, r.RightsizeEvery, r.Rules = true, cfg.DetectRightsizeEvery, ruleSet

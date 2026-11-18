@@ -5,6 +5,11 @@
 {{- $svc := $ti.service }}
 {{- $cold := $ti.clickhouse.coldStorage }}
 {{- $an := $ti.analysis }}
+{{- $nt := $ti.notify }}
+{{- $ntUrl := $nt.alertmanagerUrl }}
+{{- if and (not $ntUrl) .Values.alertmanager.enabled }}{{ $ntUrl = printf "http://alertmanager.%s.svc.cluster.local:9093" .Values.alertmanager.namespace }}{{ end }}
+{{- if and $nt.enabled (not $ntUrl) }}{{ fail "telemetryIngest.notify needs an Alertmanager: set telemetryIngest.notify.alertmanagerUrl, or switch on alertmanager.enabled" }}{{ end }}
+{{- if and $nt.enabled (not (has $nt.minSeverity (list "critical" "warning" "info"))) }}{{ fail (printf "telemetryIngest.notify.minSeverity %q must be critical, warning or info" $nt.minSeverity) }}{{ end }}
 {{- if $an.enabled }}
 {{- if not $an.existingSecret }}{{ fail "telemetryIngest.analysis.existingSecret is required when analysis.enabled (a Secret holding the Anthropic API key)" }}{{ end }}
 {{- if not (regexMatch "^[a-z0-9][a-z0-9.-]*$" $an.model) }}{{ fail (printf "telemetryIngest.analysis.model %q is not a model id" $an.model) }}{{ end }}
@@ -345,6 +350,27 @@ spec:
 {{- end }}
 {{- if $ti.exposeClusterInfo }}
             - --expose-cluster-info
+{{- end }}
+{{- if and $nt.enabled $ti.detection.enabled }}
+            - {{ printf "--notify-alertmanager-url=%s" $ntUrl | quote }}
+            - --notify-min-severity={{ $nt.minSeverity }}
+            {{- with $nt.uiUrl }}
+            - {{ printf "--notify-ui-url=%s" . | quote }}
+            {{- end }}
+{{- end }}
+{{- if $ti.costs.enabled }}
+            {{- if not (and (gt (float64 $ti.costs.vcpuGbRatio) 0.0) (le (float64 $ti.costs.vcpuGbRatio) 100.0)) }}{{ fail "telemetryIngest.costs.vcpuGbRatio must be above 0 and at most 100" }}{{ end }}
+            - --costs
+            - --costs-azure-prices={{ $ti.costs.azurePrices }}
+            - --costs-vcpu-gb-ratio={{ $ti.costs.vcpuGbRatio }}
+            {{- if $ti.costs.prices }}
+            {{- /* prices are numbers whatever way they were set (--set gives a decimal as text) */ -}}
+            {{- $prices := dict }}
+            {{- range $type, $p := $ti.costs.prices }}
+            {{- $_ := set $prices $type (dict "hourly" (float64 $p.hourly) "spotHourly" (float64 (default 0 $p.spotHourly))) }}
+            {{- end }}
+            - {{ printf "--costs-prices=%s" ($prices | toJson) | quote }}
+            {{- end }}
 {{- end }}
 {{- if $ti.rules.defaults }}
             - {{ printf "--rules-defaults=%s" ($ti.rules.defaults | toJson) | quote }}
