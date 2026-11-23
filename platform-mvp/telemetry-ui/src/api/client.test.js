@@ -153,3 +153,120 @@ describe('metrics()', () => {
     expect(f.calls[0].url).toBe('/api/v1/projects/gke/metrics')
   })
 })
+
+describe('send (a call that changes something)', () => {
+  const MANAGE = 'us-manage-key-0123456789abc'
+
+  it('uses the manage key it is given, never the session\'s, in a header and not in the URL', async () => {
+    const f = fakeFetch(201, { data: { id: 'a1' } })
+    const out = await clientWith(f).send('POST', 'enrollments', { key: MANAGE, body: { cluster: 'gke' }, actor: 'ana@example.com' })
+    expect(out).toEqual({ id: 'a1' })
+    const { url, init } = f.calls[0]
+    expect(url).toBe('/api/v1/projects/gke/enrollments')
+    expect(url).not.toContain(MANAGE)
+    expect(init.method).toBe('POST')
+    expect(init.headers['X-API-Key']).toBe(MANAGE)
+    expect(init.headers['X-API-Key']).not.toBe(KEY)
+    expect(init.headers['Content-Type']).toBe('application/json')
+    expect(init.headers['X-Actor']).toBe('ana@example.com')
+    expect(init.body).toBe('{"cluster":"gke"}')
+    expect(init.credentials).toBe('same-origin')
+    expect(init.cache).toBe('no-store')
+  })
+
+  it('sends no body and no content type for a DELETE, and leaves out an actor that is not valid', async () => {
+    const f = fakeFetch(200, { data: {} })
+    await clientWith(f).send('DELETE', 'enrollments/0123456789ab', { key: MANAGE, actor: 'a;b' })
+    const { init } = f.calls[0]
+    expect(init.method).toBe('DELETE')
+    expect(init.body).toBeUndefined()
+    expect(init.headers['Content-Type']).toBeUndefined()
+    expect(init.headers['X-Actor']).toBeUndefined()
+  })
+
+  it('refuses without asking when there is no manage key, or no session', async () => {
+    const f = fakeFetch(200, { data: {} })
+    for (const key of [undefined, '', '   ', 42]) {
+      await expect(clientWith(f).send('POST', 'enrollments', { key, body: {} })).rejects.toMatchObject({ kind: 'auth', message: expect.stringContaining('manage key') })
+    }
+    await expect(clientWith(f, sessionOf(null)).send('POST', 'enrollments', { key: MANAGE, body: {} })).rejects.toMatchObject({ kind: 'auth' })
+    await expect(clientWith(f, sessionOf({ project: 'Bad Name', key: KEY })).send('POST', 'x', { key: MANAGE })).rejects.toMatchObject({ kind: 'request' })
+    expect(f).not.toHaveBeenCalled()
+  })
+
+  it('says what went wrong in words a person can use, and never repeats the key', async () => {
+    const cases = [
+      [400, { error: 'cluster must be lower-case' }, 'cluster must be lower-case'],
+      [401, null, 'manage key is required'],
+      [403, null, 'must be a manage key'],
+      [404, { error: 'no such enrollment' }, 'no such enrollment'],
+      [405, null, 'proxy does not let this through'],
+      [413, null, 'too large'],
+      [429, { error: 'a project may have 20 unredeemed tokens at once' }, '20 unredeemed'],
+      [502, null, 'not reachable'],
+      [500, null, 'answered 500'],
+    ]
+    for (const [status, body, want] of cases) {
+      const err = await clientWith(fakeFetch(status, body)).send('POST', 'enrollments', { key: MANAGE, body: {} }).catch((e) => e)
+      expect(err).toBeInstanceOf(ApiError)
+      expect(err.status).toBe(status)
+      expect(err.message).toContain(want)
+      expect(err.message).not.toContain(MANAGE)
+    }
+  })
+
+  it('tells a timeout and an unreachable server apart, and survives a body that is not JSON', async () => {
+    const down = vi.fn(async () => { throw new TypeError('failed to fetch ' + MANAGE) })
+    const e1 = await clientWith(down).send('POST', 'enrollments', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(e1.kind).toBe('network')
+    expect(e1.message).not.toContain(MANAGE)
+    const slow = vi.fn((url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')))))
+    const e2 = await clientWith(slow, connected, { timeoutMs: 5 }).send('POST', 'enrollments', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(e2.kind).toBe('timeout')
+    expect(await clientWith(fakeFetch(200, null, { text: 'html' })).send('DELETE', 'enrollments/0123456789ab', { key: MANAGE })).toBeNull()
+  })
+})
+
+describe('send: what a call that takes long or is answered by the service itself needs', () => {
+  const MANAGE = 'us-manage-key-0123456789abcdef'
+  it('lets one call wait longer than the client does, and still cuts it off', async () => {
+    const slow = vi.fn((url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')))))
+    // the client's own limit is an hour here: only the call's own limit can have cut this one off
+    const e = await clientWith(slow, connected, { timeoutMs: 3600000 }).send('POST', 'incidents/abcdefgh/analysis', { key: MANAGE, timeoutMs: 5 }).catch((x) => x)
+    expect(e.kind).toBe('timeout')
+    // and a call without its own limit takes the client's
+    const e2 = await clientWith(slow, connected, { timeoutMs: 5 }).send('POST', 'incidents/abcdefgh/analysis', { key: MANAGE }).catch((x) => x)
+    expect(e2.kind).toBe('timeout')
+  })
+
+  it('says what the service says when a change is refused because the thing moved on, and has its own words when it says nothing', async () => {
+    const a = await clientWith(fakeFetch(409, { error: 'the rule has changed since it was read: it is now at version 3', current_version: 3 })).send('PUT', 'rules/rightsize.memory', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(a.status).toBe(409)
+    expect(a.kind).toBe('request')
+    expect(a.message).toBe('the rule has changed since it was read: it is now at version 3')
+    const b = await clientWith(fakeFetch(409, null)).send('PUT', 'rules/rightsize.memory', { key: MANAGE, body: {} }).catch((e) => e)
+    expect(b.status).toBe(409)
+    expect(b.message).toContain('changed')
+    expect(b.message).not.toContain(MANAGE)
+  })
+
+  it('passes on what the service says when IT answers 501 or 502, and keeps its own words when a proxy does', async () => {
+    const a = await clientWith(fakeFetch(502, { error: 'Claude could not be reached or had a failure; try again' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(a.message).toBe('Claude could not be reached or had a failure; try again')
+    expect(a.status).toBe(502)
+    expect(a.kind).toBe('unavailable')
+    const b = await clientWith(fakeFetch(501, { error: 'analysis is not set up on this service' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(b.message).toBe('analysis is not set up on this service')
+    expect(b.status).toBe(501)
+    // a proxy's page is not JSON: nothing to pass on
+    const c = await clientWith(fakeFetch(502, null, { text: '<html>Bad gateway</html>' })).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(c.message).toContain('not reachable')
+    const d = await clientWith(fakeFetch(501, null)).send('POST', 'x', { key: MANAGE }).catch((e) => e)
+    expect(d.message).toContain('answered 501')
+    // a 503 and a 504 keep the plain sentence whatever the body says: those are the service being down or overloaded, not a reason to quote
+    for (const status of [503, 504]) {
+      const e = await clientWith(fakeFetch(status, { error: 'something internal' })).send('POST', 'x', { key: MANAGE }).catch((x) => x)
+      expect(e.message).toContain('not reachable')
+    }
+  })
+})

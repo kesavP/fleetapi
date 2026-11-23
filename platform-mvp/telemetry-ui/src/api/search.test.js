@@ -68,6 +68,10 @@ describe('calls', () => {
       return ['b', 'a', 'b', '']
     }
     expect(await serviceNames({ get }, { seconds: 60 })).toEqual(['a', 'b'])
+    // strict: one source failing still leaves the other, but both failing is an error and not an empty list
+    await expect(serviceNames({ get: async () => { throw new Error('denied') } }, { seconds: 60, strict: true })).rejects.toThrow('denied')
+    expect(await serviceNames({ get }, { seconds: 60, strict: true })).toEqual(['a', 'b'])
+    expect(await serviceNames({ get: async () => { throw new Error('denied') } }, { seconds: 60 })).toEqual([])
     const both = async (p) => (p === 'logs/services' ? ['c', 'a'] : ['b', 'a'])
     expect(await serviceNames({ get: both }, { seconds: 60 })).toEqual(['a', 'b', 'c'])
   })

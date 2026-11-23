@@ -1,0 +1,4 @@
+Deployment from a render with the Secrets removed:
+helm template hub deploy/platform-mvp/chart/hub-services -n monitoring -f hub-azure.yaml \
+  --show-only templates/telemetry-ingest.yaml \
+  | awk 'BEGIN{RS="\n---\n";ORS="\n---\n"} !/(^|\n)kind: Secret\n/' > hub-nosecret.yaml

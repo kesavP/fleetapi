@@ -1,0 +1,63 @@
+❯ how do i enable clickhouse of gcs
+
+The chart already has this feature (telemetryIngest.clickhouse.coldStorage). It moves old data from the pod's disk to a GCS bucket, and you keep querying it normally. I haven't been able to test it against real GCS, so try it on a throwaway bucket first. You need a bucket, a service account, a key for that account, a Secret, and a chart update.
+
+1. Bucket, service account and key (run in your Cloud Shell)
+PROJECT=fleetapi-513707; BUCKET=fleetapi-telemetry-cold; SA=clickhouse-cold
+gcloud storage buckets create gs://$BUCKET --project $PROJECT --location us-central1 --uniform-bucket-level-access
+gcloud iam service-accounts create $SA --project $PROJECT
+gcloud storage buckets add-iam-policy-binding gs://$BUCKET \
+  --member serviceAccount:$SA@$PROJECT.iam.gserviceaccount.com --role roles/storage.objectAdmin
+gcloud storage hmac create $SA@$PROJECT.iam.gserviceaccount.com      # prints an access id and a secret ONCE
+Use the same region as the cluster to avoid transfer charges. ClickHouse talks to GCS through its S3-compatible API, which is why it needs an HMAC key rather than a JSON key.
+
+2. Put the key in a Secret (don't paste these values into chat or commit them)
+kubectl -n monitoring create secret generic telemetry-gcs \
+  --from-literal=accessKeyId='<access id>' --from-literal=secretAccessKey='<secret>'
+
+3. Add this to the values you already install the hub char
+telemetryIngest:
+  clickhouse:
+    coldStorage:
+      enabled: true
+      bucket: fleetapi-telemetry-cold
+      existingSecret: telemetry-gcs
+      path: telemetry
+      coldAfter: 48h        # data older than this moves tter than every retention (336h for metrics, 168h for therest)
+- Same other values: use the same other values you used fo tag, service type, namespace, and so on). Rendering withfewer values would put the defaults back.
+- Whole-chart upgrade: a whole-chart helm upgrade is the tause it regenerates the keys.
+
+4. Apply only the ClickHouse and ingest objects, leaving t
+helm template h deploy/platform-mvp/chart/hub-services -f <your values> \
+  -s templates/telemetry-ingest.yaml \
+ | python3 -c 'import sys,yaml; print(yaml.safe_dump_all([d for d in yaml.safe_load_all(sys.stdin) if d and d["kind"]!="Secret"]))' \
+ | kubectl apply -f -
+The filter drops the Secret documents. helm template has no cluster to look at, so it would otherwise render new random keys and ClickHouse
+password and overwrite the real ones.
+
+What happens when you apply it
+- ClickHouse: restarts once, because its configuration changed. There is a short gap, and the ingest service retries meanwhile.
+- Ingest: restarts, and on start it puts the four big tablofile samples) on the new policy.
+- Image: the ingest image has to be one that has the flags (--storage-policy, --cold-volume, --cold-after). Check with kubectl -n monitoring logs
+  deploy/telemetry-ingest | head; an "unknown flag" error
+
+5. Check that it worked
+kubectl -n monitoring exec -it telemetry-clickhouse-0 -- sh -c 'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD"'
+SELECT name, type FROM system.disks;                      che' disk, type ObjectStorage
+SELECT policy_name, volume_name, disks FROM system.storage_policies;   -- tiered: default + cold
+SELECT name, storage_policy FROM system.tables WHERE datab'logs_records','metrics_samples');   -- tiered
+If ClickHouse doesn't start, run kubectl -n monitoring logs telemetry-clickhouse-0. A wrong key or bucket is the usual cause, because ClickHouse
+checks access at startup.
+
+6. See data actually move
+- Wait: it happens on its own after coldAfter, plus up to about a day, because moves are decided per part.
+- Prove it works now: you can force one partition:
+SELECT partition, disk_name, rows FROM system.parts WHERE database='telemetry' AND table='logs_records' AND active;
+ALTER TABLE telemetry.logs_records MOVE PARTITION '<a part'cold';
+  Then gcloud storage ls --recursive gs://fleetapi-telemetry-cold/telemetry | head should list objects.
+- UI: with telemetryIngest.exposeClusterInfo=true, the Conhows the bucket as an "Object storage" disk with how muchis stored on it.
+
+Things to know
+- Turning it off: this doesn't bring moved data back. It sHouse needs this configuration to read those tables.
+- Cold reads: queries over cold data are slower and cost bucket requests.
+- Cost: you pay for bucket storage and requests.

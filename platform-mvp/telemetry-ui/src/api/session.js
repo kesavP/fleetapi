@@ -17,8 +17,15 @@ function browserStorage() {
 
 export function createSession(storage = browserStorage()) {
   let memory = null
+  const listeners = new Set()
+  const changed = () => listeners.forEach((f) => f())
 
   return {
+    /** Calls `fn` whenever the project or key is set or cleared (not with the key); returns a function that stops it. */
+    subscribe(fn) {
+      listeners.add(fn)
+      return () => listeners.delete(fn)
+    },
     /** {project, key}, or null when not connected. */
     get() {
       if (memory) return memory
@@ -40,6 +47,7 @@ export function createSession(storage = browserStorage()) {
       } catch {
         // storage refused: memory still holds it for this page
       }
+      changed()
     },
     clear() {
       memory = null
@@ -51,6 +59,7 @@ export function createSession(storage = browserStorage()) {
       } catch {
         // nothing to clear
       }
+      changed()
     },
   }
 }

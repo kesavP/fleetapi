@@ -29,7 +29,7 @@ const tops = (c) => c.get.mock.calls.filter(([p]) => p === 'profiles/top')
 async function mountAt(query = '', props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/profiles', name: 'profiles', component: ProfilesView }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/profiles', name: 'profiles', component: ProfilesView }],
   })
   router.push('/profiles' + query)
   await router.isReady()

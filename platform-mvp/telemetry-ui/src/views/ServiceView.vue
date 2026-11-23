@@ -1,8 +1,9 @@
 <script setup>
-import { computed, inject, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { WINDOWS, loadService } from '../api/services'
 import { hasMetrics, loadServiceMetrics } from '../api/serviceMetrics'
+import PluginCards from '../components/PluginCards.vue'
 import { formatDuration, severityClass, summarizeLogs, summarizeSpans } from '../api/serviceStats'
 
 // Takes the client and session by injection so a test can hand it fakes.
@@ -80,16 +81,30 @@ async function load() {
   }
 }
 
-onMounted(load)
+// An address like /applications/<name>#memory (the Map's hover menu) lands on that part of the page, once the page has its data.
+const panel = ref(null)
+async function scrollToHash() {
+  const id = String(route.hash || '').slice(1)
+  if (!/^[a-z0-9-]+$/.test(id)) return // only a plain name: it is looked up below, in this page's own section
+  await nextTick()
+  const el = panel.value && panel.value.querySelector(`[id="${id}"]`)
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' })
+}
+onMounted(async () => {
+  await load()
+  await scrollToHash()
+})
 watch(name, load)
+watch(() => route.hash, scrollToHash)
 </script>
 
 <template>
-  <section class="panel">
-    <p class="crumb"><router-link to="/services">← Services</router-link></p>
-    <h2 class="svc-title">{{ name }}</h2>
+  <div class="page-head">
+    <div><p class="crumb"><router-link to="/applications">← Applications</router-link></p><h1 class="svc-title">{{ name }}</h1></div>
+  </div>
+  <section ref="panel" class="panel">
     <p v-if="!connected" class="help">
-      Not connected. <router-link to="/">Connect with a project and its read key</router-link> first.
+      Not connected. <router-link to="/connection">Connect with a project and its read key</router-link> first.
     </p>
     <template v-else>
       <div class="toolbar">
@@ -101,7 +116,7 @@ watch(name, load)
       </div>
 
       <p v-if="allFailed" class="error" role="alert">
-        Nothing could be loaded: {{ Object.values(errors)[0] }} <router-link to="/">Check the connection.</router-link>
+        Nothing could be loaded: {{ Object.values(errors)[0] }} <router-link to="/connection">Check the connection.</router-link>
       </p>
       <template v-else-if="data">
         <p v-if="failed.length" class="warn" role="status">Not loaded: {{ failed.join(', ') }}. The page may be incomplete.</p>
@@ -136,7 +151,7 @@ watch(name, load)
                 <thead><tr><th>Service</th><th>Protocol</th><th>Rate</th><th>Errors</th><th>p95</th></tr></thead>
                 <tbody>
                   <tr v-for="e in list" :key="e.peer">
-                    <td class="name"><router-link v-if="!e.peer.startsWith('external:')" :to="{ name: 'service', params: { name: e.peer } }">{{ e.peerLabel }}</router-link><template v-else>{{ e.peerLabel }}</template></td>
+                    <td class="name"><router-link v-if="!e.peer.startsWith('external:')" :to="{ name: 'application', params: { name: e.peer } }">{{ e.peerLabel }}</router-link><template v-else>{{ e.peerLabel }}</template></td>
                     <td>{{ e.protocols.length ? e.protocols.join(', ') : 'tcp' }}</td>
                     <td>{{ edgeRate(e) }}</td>
                     <td :class="{ bad: e.errPct >= 5 }">{{ e.errPct.toFixed(1) }}% <span class="muted">({{ e.errBasis }})</span></td>
@@ -149,13 +164,13 @@ watch(name, load)
           <template v-if="res && Object.values(res).some((v) => v !== null)">
             <h3>Resources</h3>
             <div class="cards" data-section="resources">
-              <div class="card"><h3>Instances</h3><dl><div><dt>Running</dt><dd>{{ res.instances ?? '–' }}</dd></div></dl></div>
-              <div class="card"><h3>CPU</h3>
+              <div id="instances" class="card"><h3>Instances</h3><dl><div><dt>Running</dt><dd>{{ res.instances ?? '–' }}</dd></div></dl></div>
+              <div id="cpu" class="card"><h3>CPU</h3>
                 <dl>
                   <div><dt>Used (mean)</dt><dd>{{ cores(res.cpuCores) }} cores</dd></div>
                   <div v-if="res.cpuLimitCores"><dt>Limit</dt><dd>{{ cores(res.cpuLimitCores) }} cores</dd></div>
                 </dl></div>
-              <div class="card"><h3>Memory</h3>
+              <div id="memory" class="card"><h3>Memory</h3>
                 <dl>
                   <div><dt>In use</dt><dd>{{ bytes(res.memoryBytes) }}</dd></div>
                   <div v-if="res.memoryLimitBytes"><dt>Limit</dt><dd>{{ bytes(res.memoryLimitBytes) }}</dd></div>
@@ -167,6 +182,7 @@ watch(name, load)
                 </dl></div>
             </div>
           </template>
+          <PluginCards v-if="metrics.cards && metrics.cards.length" :cards="metrics.cards" />
         </template>
 
         <template v-if="spans && spans.total">
@@ -198,6 +214,29 @@ watch(name, load)
           <p class="help axis"><span>{{ clock(spans.from) }}</span><span>{{ clock(spans.to) }}</span></p>
         </template>
 
+        <section id="dns" class="dns-section">
+          <h3>DNS</h3>
+          <p v-if="!metricsApply" class="help">DNS lookups are kept for Kubernetes workloads and units on a host.</p>
+          <p v-else-if="!metrics || !metrics.dns" class="help">No DNS lookups recorded for this application in the window.</p>
+          <template v-else>
+            <p class="help" data-testid="dns-summary">
+              {{ perSec(metrics.dns.rps) }} lookups a second;
+              <span :class="{ bad: metrics.dns.failedShare >= 0.05, caution: metrics.dns.failedShare >= 0.01 && metrics.dns.failedShare < 0.05 }">{{ pct(metrics.dns.failedShare) }} fail</span>
+              (SERVFAIL, refused, malformed); {{ perSec(metrics.dns.nxdomainRps) }} a second found no such name, which is normal where search domains are in use.
+            </p>
+            <table class="services calls dns-table">
+              <thead><tr><th>Name</th><th>Per second</th><th>Failing</th><th>No such name</th></tr></thead>
+              <tbody>
+                <tr v-for="d in metrics.dns.domains" :key="d.domain">
+                  <td class="name wrap">{{ d.domain }}</td><td>{{ perSec(d.rps) }}</td>
+                  <td :class="{ bad: d.failedRps > 0 }">{{ d.failedRps > 0 ? perSec(d.failedRps) : '–' }}</td><td>{{ d.nxdomainRps > 0 ? perSec(d.nxdomainRps) : '–' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="metrics.dns.domainCount > metrics.dns.domains.length" class="help">The {{ metrics.dns.domains.length }} of {{ metrics.dns.domainCount }} names with the most failures, then the most lookups.</p>
+          </template>
+        </section>
+
         <h3>Recent errors</h3>
         <p v-if="!recentErrors.length" class="help">None in the window.</p>
         <ul v-else class="events">
@@ -220,7 +259,7 @@ watch(name, load)
           </tbody>
         </table>
 
-        <h3>Logs <router-link class="more" :to="{ name: 'logs', query: { service: name } }">All logs →</router-link> <span v-if="logs && logs.total" class="muted">
+        <h3 id="logs">Logs <router-link class="more" :to="{ name: 'logs', query: { service: name } }">All logs →</router-link> <span v-if="logs && logs.total" class="muted">
           ({{ logs.bySeverity.error }} error, {{ logs.bySeverity.warn }} warn, {{ logs.bySeverity.info }} info<template v-if="logs.truncated">, newest {{ logs.total }} only</template>)
         </span></h3>
         <p v-if="!recentLogs.length" class="help">No logs in the window.</p>

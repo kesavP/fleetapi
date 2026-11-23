@@ -64,6 +64,7 @@ export function createEvaluator({
     const t = now()
     const client = createClient({ session: { get: () => ({ project: p.name, key: p.readKeys[0] }) }, base: config.readApi, fetchImpl })
     const before = new Map(st.alerts.map((a) => [a.key, a.status]))
+    const wasHealthy = st.ok > 0 && !st.lastError // a quiet service logs nothing per check, so say once that it is looking
     try {
       const result = await check(client, config.thresholds, { now: () => t })
       st.alerts = reconcile(st.alerts, result.alerts, t)
@@ -73,6 +74,9 @@ export function createEvaluator({
       st.lastError = ''
       st.errorSince = 0
       st.ok++
+      if (!wasHealthy) {
+        log({ level: 'info', msg: 'check ok', project: p.name, services: result.checked, firing: st.alerts.filter((a) => a.status === 'firing').length, skipped: result.skipped.length })
+      }
       for (const a of st.alerts) {
         if (before.get(a.key) !== a.status && (a.status === 'firing' || a.status === 'resolved')) {
           log({ level: 'info', msg: `alert ${a.status}`, project: p.name, rule: a.rule, service: a.service, severity: a.severity })

@@ -7,15 +7,23 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build
+# Which build this is: shown in the sidebar and served as /version.json (see src/buildInfo.js). `make build-telemetry-ui-image` passes them;
+# without them it is a development build, built now.
+ARG APP_VERSION=
+ARG APP_COMMIT=
+ARG APP_BUILT=
+RUN APP_VERSION="$APP_VERSION" APP_COMMIT="$APP_COMMIT" APP_BUILT="$APP_BUILT" npm run build
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY nginx/security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY nginx/05-resolver.envsh /docker-entrypoint.d/05-resolver.envsh
+# The entrypoint sources only executable *.envsh files, and a file copied from a Windows or WSL checkout (/mnt/c) arrives without the
+# executable bit, so set it here instead of relying on the checkout.
+COPY --chmod=0755 nginx/05-resolver.envsh /docker-entrypoint.d/05-resolver.envsh
 COPY --from=build /src/dist /usr/share/nginx/html
 # Only these two are substituted into the template: the nginx variables in it ($api, $uri, ...) stay as they are.
 ENV API_UPSTREAM=http://telemetry-ingest \
     ALERTS_UPSTREAM=http://telemetry-alerts \
-    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|ALERTS_UPSTREAM|NGINX_RESOLVER)$'
+    UI_COSTS=false \
+    NGINX_ENVSUBST_FILTER='^(API_UPSTREAM|ALERTS_UPSTREAM|UI_COSTS|NGINX_RESOLVER)$'
 EXPOSE 8080

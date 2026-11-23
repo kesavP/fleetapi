@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { hasMetrics, loadServiceMetrics, summarizeResources, trafficFor } from './serviceMetrics'
 
 describe('hasMetrics', () => {
-  it('is true only for names the node-agent gives a pod workload', () => {
-    for (const n of ['/k8s/shop/frontend', '/k8s/data/redis', '/k8s-cronjob/ops/nightly']) expect(hasMetrics(n)).toBe(true)
-    for (const n of ['frontend', '/system.slice/sshd.service', '']) expect(hasMetrics(n)).toBe(false)
+  it('is true for an application id: a Kubernetes workload, or a unit or container on a plain host', () => {
+    for (const n of ['/k8s/shop/frontend', '/k8s/data/redis', '/k8s-cronjob/ops/nightly', '/system.slice/nginx.service', '/docker/postgres']) expect(hasMetrics(n)).toBe(true)
+  })
+  it('is false for a plain name, a container id, and an orchestrator it does not group', () => {
+    for (const n of ['frontend', '', '/k8s/shop/frontend-5d6f8c7b9-xk2lp/server', '/nomad/ns/job/g/a/t']) expect(hasMetrics(n)).toBe(false)
   })
 })
 
@@ -69,6 +71,13 @@ describe('summarizeResources', () => {
     expect(out.cpuCores).toBeCloseTo(0.3, 9)
   })
 
+  it('counts pods, not containers: a sidecar is not a second instance', () => {
+    const sidecar = '/k8s/shop/b-5d6f8c7b9-xk2lp/istio-proxy'
+    const out = summarizeResources('/k8s/shop/b', { rss: [g(POD1, 100), g(sidecar, 50), g(POD2, 100)] }, 60)
+    expect(out.instances).toBe(2) // POD1 (with its sidecar) and POD2
+    expect(out.memoryBytes).toBe(250) // but the memory of every container counts
+  })
+
   it('treats a limit of 0 (none set) as no limit', () => {
     const out = summarizeResources('/k8s/shop/b', { rss: [g(POD1, 1)], cpuLimit: [g(POD1, 0)], memLimit: [g(POD1, 0)] }, 60)
     expect(out.cpuLimitCores).toBeNull()
@@ -105,6 +114,42 @@ describe('loadServiceMetrics', () => {
       if (fail[params.name]) throw new Error(fail[params.name])
       return { series: data[params.name] || [] }
     }),
+  })
+
+  describe('plugin cards', () => {
+    const net = {
+      container_net_tcp_successful_connects_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(10) }],
+      container_net_tcp_connection_time_seconds_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(0.04) }],
+      container_net_tcp_bytes_sent_total: [{ labels: { container_id: POD, destination: 'x:1' }, points: flat(2048) }],
+    }
+
+    it('adds the connection and network cards of the application beside the resources', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: { ...DATA, ...net } }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards.map((c) => c.id)).toEqual(['connections', 'network'])
+      expect(r.cards[0].rows.find((x) => x.label === 'Setup time (mean)').value).toBe('4 ms')
+      expect(r.cards[1].rows.find((x) => x.label === 'Sent').value).toBe('2 KiB/s')
+      expect(r.found).toBe(true)
+    })
+
+    it('has no cards for a project without those metrics, and does not ask for them', async () => {
+      const client = clientOf()
+      const r = await loadServiceMetrics(client, '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards).toEqual([])
+      expect(client.get.mock.calls.some(([, p]) => p && /container_net_tcp_(bytes|connection|retrans|active)/.test(p.name))).toBe(false)
+    })
+
+    it('keeps the page when a card cannot be read, and says which metric', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: { ...DATA, ...net }, fail: { container_net_tcp_bytes_sent_total: 'late' } }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards.map((c) => c.id)).toEqual(['connections'])
+      expect(r.warnings).toContain('Network: container_net_tcp_bytes_sent_total: late')
+      expect(r.resources.memoryBytes).toBe(1024)
+    })
+
+    it('shows cards for an application that has only network metrics', async () => {
+      const r = await loadServiceMetrics(clientOf({ data: net }), '/k8s/shop/b', { seconds: 600, now: NOW })
+      expect(r.cards).toHaveLength(2)
+      expect(r.found).toBe(true)
+    })
   })
 
   it('reads the resources of the workload the name points to', async () => {
@@ -150,6 +195,13 @@ describe('loadServiceMetrics', () => {
     const r = await loadServiceMetrics(clientOf({ fail: all }), '/k8s/shop/b', { seconds: 600, now: NOW })
     expect(r.found).toBe(false)
     expect(r.warnings.filter((w) => w.endsWith(': denied'))).toHaveLength(Object.keys(DATA).length)
+  })
+
+  it('reads the DNS lookups of the application too', async () => {
+    const data = { ...DATA, container_dns_requests_total: [{ labels: { container_id: POD, domain: 'a.example', status: 'servfail', request_type: 'TypeA' }, points: flat(0.5) }] }
+    const r = await loadServiceMetrics(clientOf({ data }), '/k8s/shop/b', { seconds: 600, now: NOW })
+    expect(r.dns).toMatchObject({ failedRps: expect.closeTo(0.5, 9), domains: [{ domain: 'a.example' }] })
+    expect((await loadServiceMetrics(clientOf(), '/k8s/shop/b', { seconds: 600, now: NOW })).dns).toBeNull() // the project has no DNS metric
   })
 
   it('says nothing was found for a workload with no metrics', async () => {

@@ -44,7 +44,7 @@ async function mountView({ recent = HEALTHY, baseline = HEALTHY, sess = session(
   })
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/services/:name', name: 'service', component: stub }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/applications/:name', name: 'application', component: stub }],
   })
   router.push('/')
   await router.isReady()
@@ -79,7 +79,7 @@ describe('AlertsView', () => {
     expect(a.text()).toContain('errorSharePct')
     expect(a.text()).toContain('Busiest callers: shop/frontend')
     expect(a.text()).not.toMatch(/\d{10,}/) // "since" is a readable time too
-    expect(a.get('a.name').attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Fcartservice')
+    expect(a.get('a.name').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Fcartservice')
     expect(w.find('[data-testid=all-clear]').exists()).toBe(false)
   })
 
@@ -154,7 +154,7 @@ describe('AlertsView', () => {
       expect(text).toContain('whether or not anyone has this app open')
       expect(text).toContain('2 h before them') // its own baseline, not this tab's
       expect(w.findAll('[data-alert]')).toHaveLength(1)
-      expect(w.get('[data-alert]').text()).toContain('No running instances')
+      expect(w.get('[data-alert]').text()).toContain('Stopped sending data')
       const th = w.get('[data-testid=thresholds-server]').text()
       expect(th).toContain('telemetryAlerts.thresholds')
       expect(th).toContain('12') // errorShare as the service has it

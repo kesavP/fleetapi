@@ -82,4 +82,25 @@ describe('when the browser refuses storage', () => {
   it('does not throw when reading fails', () => {
     expect(createSession(memoryStorage({ getItem: throwing })).get()).toBeNull()
   })
+
+  describe('subscribe', () => {
+    it('tells a listener when the session is set or cleared, and not after it unsubscribes', () => {
+      const session = createSession(memoryStorage())
+      const seen = []
+      const stop = session.subscribe(() => seen.push(session.get() ? session.get().project : null))
+      session.set({ project: 'gke', key: 'k' })
+      session.clear()
+      expect(seen).toEqual(['gke', null])
+      stop()
+      session.set({ project: 'x', key: 'k' })
+      expect(seen).toHaveLength(2)
+    })
+    it('does not hand the listener the key', () => {
+      const session = createSession(memoryStorage())
+      let args
+      session.subscribe((...a) => (args = a))
+      session.set({ project: 'gke', key: 'secret-key' })
+      expect(JSON.stringify(args)).not.toContain('secret-key')
+    })
+  })
 })

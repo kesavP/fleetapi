@@ -49,3 +49,7 @@ hack/
 
 # Generated chainsaw reports
 chainsaw-report.json
+
+#referencepages
+uiscreenshots/*
+refui/*
