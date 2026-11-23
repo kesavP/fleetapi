@@ -833,3 +833,6 @@ It looks from 30 minutes before the start of the trouble to 5 minutes after its 
 | Process lineage | log records with `log.source=process` from fleet-node-agent: OOM kills, abnormal exits, binaries run for the first time, fork bursts | fleet-node-agent with `--process-lineage` |
 
 A source that fails is named in the gaps and the rest is answered. The Claude analysis (`POST .../analysis`) is unchanged and separate.
+
+To turn process lineage on in a spoke, run fleet-node-agent (`nodeAgent.image.repository`) with
+`--set 'nodeAgent.extraArgs={--process-lineage}'`; its records go through the agent's logs, so the spoke must be sending logs to the hub.
