@@ -30,7 +30,7 @@ type incRig struct {
 	mem *incident.MemStore
 }
 
-func newIncRig(t *testing.T) *incRig {
+func newIncRig(t *testing.T, opts ...func(*Incidents)) *incRig {
 	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "projects.json")
 	data := `{"projects":[
@@ -46,7 +46,11 @@ func newIncRig(t *testing.T) *incRig {
 	mem := incident.NewMemStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mux := http.NewServeMux()
-	(&Incidents{Projects: reg, Manager: incident.NewManager(mem, log), Log: log}).Register(mux)
+	h := &Incidents{Projects: reg, Manager: incident.NewManager(mem, log), Log: log}
+	for _, o := range opts {
+		o(h)
+	}
+	h.Register(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &incRig{t: t, srv: srv, mem: mem}

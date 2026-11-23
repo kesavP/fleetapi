@@ -34,4 +34,4 @@ echo "==> running the integration test"
 docker run --rm --network "$net" -v "$mod":/src -v gomodcache:/go/pkg/mod -v gobuildcache:/root/.cache/go-build -w /src \
   -e GOTOOLCHAIN=local -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 \
   -e CLICKHOUSE_TIERED=1 -e CLICKHOUSE_ADDR="$ch:9000" -e CLICKHOUSE_USER=it -e CLICKHOUSE_PASSWORD=it-pass \
-  "$go_image" go test -tags integration ./integration/... -count=1 -v
+  "$go_image" go test -tags integration ./integration/... -count=1 -v ${IT_RUN:+-run "$IT_RUN"}

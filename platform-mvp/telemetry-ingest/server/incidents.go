@@ -37,6 +37,8 @@ type Incidents struct {
 	Log      *slog.Logger
 	// Analyst, when set, answers POST .../incidents/{id}/analysis (analysis.go); without it that call answers 501.
 	Analyst Analyst
+	// Summaries, when set, is what GET .../incidents/{id}/summary reads besides the incident (summary.go); without it the summary has the incident only.
+	Summaries SummarySources
 
 	now      func() time.Time // a test's clock; nil is the real one
 	amu      sync.Mutex
@@ -47,6 +49,8 @@ type Incidents struct {
 func (h *Incidents) Register(mux *http.ServeMux) {
 	const base = "/api/v1/projects/{project}/incidents"
 	mux.HandleFunc("GET "+base, h.read(h.list))
+	mux.HandleFunc("GET "+base+"/stats", h.read(h.stats))
+	mux.HandleFunc("GET "+base+"/{id}/summary", h.read(h.summary))
 	mux.HandleFunc("GET "+base+"/{id}", h.read(h.get))
 	mux.HandleFunc("GET "+base+"/{id}/events", h.read(h.events))
 	mux.HandleFunc("GET "+base+"/{id}/evidence", h.read(h.evidence))

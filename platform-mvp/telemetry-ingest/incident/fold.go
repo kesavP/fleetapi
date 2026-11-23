@@ -116,6 +116,7 @@ func Fold(events []Event) (Incident, error) {
 		inc.Version = ev.Seq
 	}
 	inc.AllowedTransitions = Allowed(inc.State)
+	inc.Timing = TimingOf(inc)
 	return inc, nil
 }
 

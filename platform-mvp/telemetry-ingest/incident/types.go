@@ -142,6 +142,8 @@ type Incident struct {
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
 	ClosedAt       *time.Time `json:"closed_at,omitempty"`
 	Reopened       int        `json:"reopened"`
+	// Timing is how long each stage took, worked out from the milestones above (timing.go).
+	Timing Timing `json:"timing"`
 
 	// Version is the Seq of the last event. A caller that read version N and changes the incident with expected_version N is refused if
 	// somebody else changed it meanwhile.

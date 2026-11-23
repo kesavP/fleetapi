@@ -143,7 +143,7 @@ func main() {
 	(&server.Enroll{Projects: reg, Manager: enrollments, Log: log, Count: count}).Register(mux)
 
 	incidents := incident.NewManager(s.Incidents(), log)
-	inc := &server.Incidents{Projects: reg, Manager: incidents, Log: log}
+	inc := &server.Incidents{Projects: reg, Manager: incidents, Log: log, Summaries: s}
 	if cfg.AnalysisKey != "" {
 		inc.Analyst = &analysis.Analyst{C: analysis.NewClient(cfg.AnalysisKey, cfg.AnalysisModel), Model: cfg.AnalysisModel}
 		log.Info("analysis of incidents on", "model", cfg.AnalysisModel)

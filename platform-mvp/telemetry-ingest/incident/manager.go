@@ -270,6 +270,36 @@ func (m *Manager) List(ctx context.Context, project string, f Filter) ([]Inciden
 	return out, skipped, nil
 }
 
+// MaxStatsDays is the longest window Stats looks at.
+const MaxStatsDays = 90
+
+// Stats is how the project's incidents went in [from, to): MTTD, MTTA, MTTM and MTTR (timing.go). It reads the MaxList newest incidents; when they
+// do not reach back to `from`, the result says it is Partial. Records that do not fold are counted in `skipped` and left out, as List does.
+func (m *Manager) Stats(ctx context.Context, project string, from, to time.Time) (Stats, int, error) {
+	groups, err := m.store.Recent(ctx, project, MaxList)
+	if err != nil {
+		return Stats{}, 0, err
+	}
+	incs := make([]Incident, 0, len(groups))
+	skipped := 0
+	oldest := time.Time{}
+	for _, evs := range groups {
+		inc, err := Fold(evs)
+		if err != nil {
+			skipped++
+			m.log.Warn("incident record does not fold; left out of the stats", "project", project, "error", err)
+			continue
+		}
+		if oldest.IsZero() || inc.CreatedAt.Before(oldest) {
+			oldest = inc.CreatedAt
+		}
+		incs = append(incs, inc)
+	}
+	st := ComputeStats(incs, from, to)
+	st.Partial = len(groups) >= MaxList && oldest.After(from)
+	return st, skipped, nil
+}
+
 // Events returns the incident's timeline after `after` (a sequence number; 0 for all), at most `limit` of them (1 to 500).
 func (m *Manager) Events(ctx context.Context, project, id string, after uint32, limit int) ([]Event, error) {
 	if !ValidID(id) {
