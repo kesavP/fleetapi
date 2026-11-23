@@ -423,3 +423,10 @@ Setup time is the TCP handshake. It does not include TLS or the wait for the fir
 
 Tests: `src/cards/*.test.js` (registry, both plugins), `src/components/PluginCards.test.js` and the cases added to `api/serviceMetrics.test.js` and
 `views/ServiceView.test.js`.
+
+## MTTR and the instant summary (recorded incidents)
+
+The recorded incidents page shows, over the last 7, 30 or 90 days, MTTR (median, p90), MTTA, MTTD and how many were opened and are still open,
+with MTTR by severity (`GET .../incidents/stats`). A recorded incident's page has an **Instant summary** under its facts: the headline, how long
+each stage took, what happened near the start (rollouts, Kubernetes events, process lineage) and what could not be seen
+(`GET .../incidents/{id}/summary`). Both are read beside the rest of the page, and either failing leaves the rest as it is.

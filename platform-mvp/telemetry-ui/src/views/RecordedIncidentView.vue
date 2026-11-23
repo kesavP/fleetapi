@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import IncidentTabs from '../components/IncidentTabs.vue'
 import { dateTime } from '../format'
 import { analyseIncident, describeEvidence, latestAnalysis, loadRecordedIncident } from '../incidents/recorded'
+import { duration, loadSummary } from '../incidents/mttr'
 
 // One recorded incident: what the detector (or a person) said, the evidence it points at, and the timeline of what happened to it. It only READS, but for
 // one thing: asking Claude for resolution steps, which the hub keeps as a comment on the incident. That takes a manage key, typed for the one call and not kept.
@@ -12,26 +13,43 @@ const client = props.client || inject('client')
 const session = props.session || inject('session')
 const load = (props.loaders && props.loaders.loadRecordedIncident) || loadRecordedIncident
 const analyse = (props.loaders && props.loaders.analyseIncident) || analyseIncident
+const summarise = (props.loaders && props.loaders.loadSummary) || loadSummary
 const route = useRoute()
 
 const connected = computed(() => session.get())
 const data = ref(null) // {incident, events, warning}
 const loading = ref(false)
 const error = ref('')
+// The instant summary is read beside the incident; it failing leaves the rest of the page as it is.
+const summary = ref(null)
+const summaryError = ref('')
 
 async function refresh() {
   if (!connected.value) return
   loading.value = true
   error.value = ''
+  const id = String(route.params.id || '')
+  const sum = summarise(client, id).then(
+    (s) => { summary.value = s; summaryError.value = '' },
+    (e) => { summary.value = null; summaryError.value = e && e.message ? e.message : 'unknown error' },
+  )
   try {
-    data.value = await load(client, String(route.params.id || ''))
+    data.value = await load(client, id)
   } catch (e) {
     data.value = null
     error.value = e.message
   } finally {
     loading.value = false
   }
+  await sum
 }
+const KIND_LABEL = { rollout: 'Rollout', kubernetes: 'Kubernetes', process: 'Process', incident: 'Incident', other: 'Other' }
+const STAGES = [
+  { key: 'detect', label: 'Detected after', hint: 'from the start of the trouble to the incident being opened' },
+  { key: 'acknowledge', label: 'Taken on after', hint: 'from the opening to someone taking it on' },
+  { key: 'mitigate', label: 'Mitigated after', hint: 'from the start of the trouble' },
+  { key: 'resolve', label: 'Resolved after', hint: 'from the start of the trouble: what MTTR is made of' },
+]
 onMounted(refresh)
 
 // Asking Claude: the key is for this call and is forgotten whatever the answer is. The hub allows one analysis of an incident every two minutes.
@@ -90,6 +108,42 @@ const when = (t) => (t ? dateTime(t) : '–')
         <template v-if="data.incident.allowed.length">It can move to: {{ data.incident.allowed.join(', ') }}. </template>
         This page does not change the incident: to move it, call the incidents API with a manage key of this project.
       </p>
+
+      <section class="instant" data-testid="instant">
+        <h3>Instant summary</h3>
+        <p v-if="summaryError" class="warn" role="note" data-testid="summary-error">The instant summary could not be read: {{ summaryError }}</p>
+        <template v-else-if="summary">
+          <p class="headline" data-testid="summary-headline">{{ summary.headline }}</p>
+          <dl class="facts timing" data-testid="timing">
+            <div v-for="st in STAGES" :key="st.key" :title="st.hint">
+              <dt>{{ st.label }}</dt><dd>{{ summary.timing[st.key] === null ? 'not yet' : duration(summary.timing[st.key]) }}</dd>
+            </div>
+          </dl>
+          <template v-if="summary.findings.length">
+            <h4>What happened near the start</h4>
+            <ol class="findings" data-testid="findings">
+              <li v-for="(f, i) in summary.findings" :key="i">
+                <span class="pill kind" :class="f.kind">{{ KIND_LABEL[f.kind] }}</span>
+                {{ f.text }} <span v-if="f.at" class="muted">· {{ when(f.at) }}</span>
+              </li>
+            </ol>
+          </template>
+          <ul v-if="summary.gaps.length" class="gaps muted" data-testid="gaps">
+            <li v-for="g in summary.gaps" :key="g">{{ g }}</li>
+          </ul>
+          <details v-if="summary.timeline.length" data-testid="summary-timeline">
+            <summary>Everything around it ({{ summary.timeline.length }})</summary>
+            <table class="services" aria-label="Around the incident">
+              <thead><tr><th>When</th><th>From</th><th>What</th></tr></thead>
+              <tbody>
+                <tr v-for="(e, i) in summary.timeline" :key="i"><td>{{ when(e.at) }}</td><td>{{ KIND_LABEL[e.source] }}</td><td class="what">{{ e.text }}</td></tr>
+              </tbody>
+            </table>
+          </details>
+          <p class="help">Worked out by the hub from the incident, its workload's rollouts, Kubernetes events and process lineage. No model is involved; it lists what happened, not why.</p>
+        </template>
+        <p v-else class="help" role="status">Reading the summary…</p>
+      </section>
 
       <section v-if="analysis" class="analysis" data-testid="analysis">
         <h3>Resolution steps from Claude</h3>

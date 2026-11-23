@@ -11,7 +11,14 @@ const INC = {
 }
 const result = (o = {}) => ({ incidents: [INC], skipped: 0, ...o })
 
-async function mountAt(query = '', { load = vi.fn(async () => result()), sess = session() } = {}) {
+const STATS = {
+  from: '', to: '', opened: 5, resolved: 3, notCounted: 1, stillOpen: 2, reopened: 1, partial: false,
+  mttd: { count: 4, mean: 40, median: 30, p90: 60, max: 60 }, mtta: { count: 3, mean: 300, median: 240, p90: 600, max: 600 },
+  mttm: { count: 0, mean: null, median: null, p90: null, max: null }, mttr: { count: 3, mean: 2000, median: 1800, p90: 3600, max: 3600 },
+  bySeverity: { warning: { count: 1, median: 3600 }, critical: { count: 2, median: 600 } },
+}
+
+async function mountAt(query = '', { load = vi.fn(async () => result()), stats = vi.fn(async () => STATS), sess = session() } = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -22,9 +29,9 @@ async function mountAt(query = '', { load = vi.fn(async () => result()), sess = 
   })
   router.push('/recorded' + query)
   await router.isReady()
-  const w = mount(RecordedIncidentsView, { props: { client: {}, session: sess, loaders: { loadRecorded: load } }, global: { plugins: [router] } })
+  const w = mount(RecordedIncidentsView, { props: { client: {}, session: sess, loaders: { loadRecorded: load, loadStats: stats } }, global: { plugins: [router] } })
   await flushPromises()
-  return { w, router, load }
+  return { w, router, load, stats }
 }
 
 describe('RecordedIncidentsView', () => {
@@ -105,5 +112,33 @@ describe('RecordedIncidentsView', () => {
     expect(tabs.map((t) => t.text())).toEqual(['From the metrics', 'Recorded by the hub'])
     expect(tabs[1].attributes('aria-current')).toBe('page')
     expect(tabs[0].attributes('aria-current')).toBeUndefined()
+  })
+  describe('how long incidents take', () => {
+    it('shows MTTR, MTTA, MTTD and the counts over 7 days by default', async () => {
+      const { w, stats } = await mountAt()
+      expect(stats.mock.calls[0][1]).toBe(7)
+      expect(w.get('[data-testid=tile-mttr]').text()).toContain('30 min')
+      expect(w.get('[data-testid=tile-mttr]').text()).toContain('p90 1 h · 3 resolved')
+      expect(w.get('[data-testid=tile-mtta]').text()).toContain('4 min')
+      expect(w.get('[data-testid=tile-mttd]').text()).toContain('30 s')
+      expect(w.get('[data-testid=tile-counts]').text()).toContain('1 reopened')
+      expect(w.get('[data-testid=by-severity]').text()).toBe('MTTR by severity: critical 10 min (2) · warning 1 h (1)')
+      expect(w.find('[data-testid=partial]').exists()).toBe(false)
+    })
+    it('reads another window when it is picked', async () => {
+      const { w, stats } = await mountAt()
+      await w.get('#days').setValue('30')
+      await flushPromises()
+      expect(stats.mock.calls.at(-1)[1]).toBe(30)
+    })
+    it('says when the figures miss older incidents', async () => {
+      const { w } = await mountAt('', { stats: vi.fn(async () => ({ ...STATS, partial: true })) })
+      expect(w.get('[data-testid=partial]').text()).toContain('newest 500')
+    })
+    it('keeps the list when the figures fail', async () => {
+      const { w } = await mountAt('', { stats: vi.fn(async () => { throw new Error('nope') }) })
+      expect(w.get('[data-testid=stats-error]').text()).toContain('nope')
+      expect(w.find('table.incidents').exists()).toBe(true)
+    })
   })
 })

@@ -18,7 +18,16 @@ const EVENTS = [
 ]
 const data = (o = {}) => ({ incident: incident(), events: EVENTS, warning: '', ...o })
 
-async function mountAt(id = 'vcxxe33p', { load = vi.fn(async () => data()), analyse = vi.fn(async () => incident()), sess = session() } = {}) {
+const SUMMARY = {
+  headline: 'Critical: x (monitoring/telemetry-ui) — open for 38 min, not yet taken on. Most likely related: deployment monitoring/telemetry-ui rolled out 4 min before the trouble began.',
+  elapsed: 2280, timing: { detect: 2270, acknowledge: null, mitigate: null, resolve: null }, from: '', to: '',
+  findings: [{ at: '2026-11-16T05:19:00Z', kind: 'rollout', text: 'deployment monitoring/telemetry-ui rolled out 4 min before the trouble began', score: 92 },
+    { at: '2026-11-16T05:24:00Z', kind: 'kubernetes', text: 'BackOff ×12 on pod telemetry-ui-1: Back-off', score: 90 }],
+  timeline: [{ at: '2026-11-16T05:19:00Z', source: 'rollout', text: 'deployment rolled out' }, { at: '2026-11-16T06:00:50Z', source: 'incident', text: 'Opened by detection' }],
+  gaps: ['Process lineage: nothing unusual was recorded'],
+}
+
+async function mountAt(id = 'vcxxe33p', { load = vi.fn(async () => data()), analyse = vi.fn(async () => incident()), summary = vi.fn(async () => SUMMARY), sess = session() } = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -29,9 +38,9 @@ async function mountAt(id = 'vcxxe33p', { load = vi.fn(async () => data()), anal
   })
   router.push('/recorded/' + id)
   await router.isReady()
-  const w = mount(RecordedIncidentView, { props: { client: {}, session: sess, loaders: { loadRecordedIncident: load, analyseIncident: analyse } }, global: { plugins: [router] } })
+  const w = mount(RecordedIncidentView, { props: { client: {}, session: sess, loaders: { loadRecordedIncident: load, analyseIncident: analyse, loadSummary: summary } }, global: { plugins: [router] } })
   await flushPromises()
-  return { w, load, analyse }
+  return { w, load, analyse, summary }
 }
 
 describe('RecordedIncidentView', () => {
@@ -260,6 +269,33 @@ describe('RecordedIncidentView', () => {
       const { w, analyse } = await mountAt('vcxxe33p', { sess: session(null) })
       expect(w.find('[data-testid=analyse]').exists()).toBe(false)
       expect(analyse).not.toHaveBeenCalled()
+    })
+  })
+  describe('instant summary', () => {
+    it('reads the summary of the same incident and shows its headline, timing, findings and gaps', async () => {
+      const { w, summary } = await mountAt()
+      expect(summary.mock.calls[0][1]).toBe('vcxxe33p')
+      expect(w.get('[data-testid=summary-headline]').text()).toContain('Most likely related: deployment monitoring/telemetry-ui rolled out')
+      const timing = w.get('[data-testid=timing]').text()
+      expect(timing).toContain('Detected after37 min')
+      expect(timing).toContain('Taken on afternot yet')
+      const items = w.findAll('[data-testid=findings] li')
+      expect(items).toHaveLength(2)
+      expect(items[0].get('.pill.kind.rollout').text()).toBe('Rollout')
+      expect(items[1].text()).toContain('BackOff ×12')
+      expect(w.get('[data-testid=gaps]').text()).toContain('Process lineage')
+      expect(w.get('[data-testid=summary-timeline] summary').text()).toBe('Everything around it (2)')
+    })
+    it('keeps the rest of the page when the summary fails', async () => {
+      const { w } = await mountAt('vcxxe33p', { summary: vi.fn(async () => { throw new Error('service unavailable') }) })
+      expect(w.get('[data-testid=summary-error]').text()).toContain('service unavailable')
+      expect(w.get('[data-testid=title]').exists()).toBe(true)
+    })
+    it('shows no findings list when there are none', async () => {
+      const { w } = await mountAt('vcxxe33p', { summary: vi.fn(async () => ({ ...SUMMARY, findings: [], gaps: [], timeline: [] })) })
+      expect(w.find('[data-testid=findings]').exists()).toBe(false)
+      expect(w.find('[data-testid=gaps]').exists()).toBe(false)
+      expect(w.find('[data-testid=summary-timeline]').exists()).toBe(false)
     })
   })
 })

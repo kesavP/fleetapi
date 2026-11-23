@@ -810,3 +810,26 @@ use a stub, so they do not prove the map against a real node-agent's data.
 - **Automatic key delivery.** `copy-telemetry-credentials.sh` is run by hand or
   from the Makefile, and enrollment ([24-enrollment.md](24-enrollment.md)) replaces it with a command the cluster runs itself. A hub controller that
   pushes the key to each spoke through the connection the hub already holds (and restarts the agents on rotation) would remove that step; it is not written.
+
+## Incident timing, MTTR and the instant summary
+
+Every incident carries `timing`: `detect_seconds` (start of the trouble → opened), `acknowledge_seconds` (opened → first taken on),
+`mitigate_seconds` and `resolve_seconds` (start of the trouble → first mitigated / last resolved). A stage that has not happened is absent.
+
+`GET /api/v1/projects/{project}/incidents/stats?days=7` (1–90; a read key) gives, over the window, how many incidents were opened, resolved
+and are still open, and MTTD, MTTA, MTTM and MTTR as count, mean, median, p90 and max (MTTR also by severity). Incidents resolved as
+`false_positive` or `duplicate` are counted apart and left out of MTTR. Only the newest 500 incidents are read; `partial: true` says they did
+not reach back to the start of the window.
+
+`GET /api/v1/projects/{project}/incidents/{id}/summary` (a read key) is the incident's **instant summary**, computed in the service with no model:
+a one-line headline (state, how long, and the most likely related change), the timing, up to five **findings** ranked by how often that kind of
+thing is the cause and how close to the start it happened, a merged **timeline**, and the **gaps** (what could not be read or was not there).
+It looks from 30 minutes before the start of the trouble to 5 minutes after its resolution (or now), at most a day of the incident. Its sources:
+
+| Source | From | Needs |
+|---|---|---|
+| Rollouts | the workload's inventory history: versions whose `generation` went up, with the image change | the cluster collector |
+| Kubernetes events | events about the workload, its ReplicaSets and pods, grouped by reason | the cluster collector (`--events=all` for Normal ones) |
+| Process lineage | log records with `log.source=process` from fleet-node-agent: OOM kills, abnormal exits, binaries run for the first time, fork bursts | fleet-node-agent with `--process-lineage` |
+
+A source that fails is named in the gaps and the rest is answered. The Claude analysis (`POST .../analysis`) is unchanged and separate.

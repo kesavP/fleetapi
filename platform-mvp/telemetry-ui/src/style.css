@@ -531,3 +531,12 @@ article.finding .saving { color: var(--text); }
 .ts-legend .swatch { display: inline-block; width: .75rem; height: .2rem; margin-right: .35rem; vertical-align: middle; background: var(--muted); }
 .ts-legend .a .swatch { background: var(--accent); } .ts-legend .b .swatch { background: var(--warn); } .ts-legend .limit-key .swatch { background: var(--bad); }
 .ts-marks { color: var(--muted); } .ts-marks time { font-variant-numeric: tabular-nums; }
+
+/* incident instant summary */
+.instant { margin-top: .75rem; border-top: 1px dashed var(--line); padding-top: .5rem; }
+.instant .headline { font-weight: 600; }
+.instant dl.timing { grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); }
+.instant ol.findings { padding-left: 1.25rem; display: grid; gap: .35rem; }
+.instant ul.gaps { font-size: .85rem; padding-left: 1.25rem; }
+.pill.kind { font-size: .7rem; text-transform: uppercase; letter-spacing: .03em; }
+.mttr-tiles .tile .sub { overflow-wrap: anywhere; }
