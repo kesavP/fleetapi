@@ -76,6 +76,10 @@ last hour).
 | `GET .../logs/services`, `.../logs` | `service`, `severity`, `q` (substring), `trace_id`, `limit` |
 | `GET .../profiles` | services and profile types seen |
 | `GET .../profiles/top` | `service`, `type` (e.g. `cpu:nanoseconds`), `limit`, `format=folded` |
+| `GET .../clickhouse` | none: how the service is connected to ClickHouse and what the project has stored (below) |
+| `POST .../enrollments`, `GET .../enrollments`, `DELETE .../enrollments/{id}` | enrolling a cluster: make a one-time token (manage key), list what has been enrolled (read key), revoke (manage key). A cluster redeems its token with `POST /v1/enroll`, which takes **no API key**. See [24-enrollment.md](24-enrollment.md) |
+| `GET .../inventory`, `.../inventory/{kind}`, `.../inventory/{kind}/{uid}/history`, `.../inventory/events` | what the cluster collectors report: what is IN each cluster, how an object changed, and its events: see [23-cluster-collector.md](23-cluster-collector.md). Ingested with `POST /v1/inventory` (ingest key) |
+| `GET .../databases`, `.../databases/{target}/statements`, `/activity`, `/slow`, `/pools` | what the database collectors report: see [22-database-collector.md](22-database-collector.md). Ingested with `POST /v1/db` and the ingest key |
 
 `rate=true` turns a counter into a per-second rate over `step`-second buckets
 and treats a drop as a counter reset.
@@ -148,11 +152,233 @@ Differences from the Coroot server's schema, on purpose:
 The tables are **not** compatible with Coroot's UI. Pointing Coroot at this
 database would need the upstream schema.
 
+### ClickHouse information
+
+`GET /api/v1/projects/{p}/clickhouse` feeds the UI's Configuration → ClickHouse tab. It answers:
+
+- `connection`: `reachable`, `protocol` (`native`), `database`, `tls`, `version`, `ping_ms`. When ClickHouse does not answer, `reachable` is false and `error` is the fixed sentence "ClickHouse did not answer.": the driver's own message can carry the address.
+- `storage`: per kind (`metrics`, `traces`, `logs`, `profiles`) **this project's** `rows`, `estimated_bytes`, `compression` (uncompressed over compressed), `ttl_seconds` and `oldest`. The size is an estimate: each table's compressed bytes (from `system.parts`) times the project's share of its rows.
+- `cluster` and the whole-table `table_bytes` / `table_rows`: **only with `--expose-cluster-info`** (chart: `telemetryIngest.exposeClusterInfo`, default off). They are the platform's totals and the server's disks, which say something about other projects, so a project's key does not see them unless the operator chooses.
+- `warnings`: set when a system table could not be read.
+
+The address, user and password are never in the answer. The endpoint is read-only: a read key held in a browser must not be able to repoint the service's database.
+
+## Tiered storage (Google Cloud Storage)
+
+Recent data stays on the ClickHouse volume; older data moves to a GCS bucket and is still read through the same tables. Only the four big tables (`metrics_samples`, `traces_spans`, `logs_records`, `profiling_samples`) move; the small lookup tables (`metrics_series`, `profiling_stacks`, `profiling_services`) stay local.
+
+Turn it on in the hub chart (`telemetryIngest.clickhouse.coldStorage`):
+
+```sh
+gsutil hmac create <service-account>        # the service account needs roles/storage.objectAdmin on the bucket
+kubectl -n monitoring create secret generic telemetry-gcs \
+  --from-literal=accessKeyId=<access id> --from-literal=secretAccessKey=<secret>
+helm template ... --set telemetryIngest.clickhouse.coldStorage.enabled=true \
+  --set telemetryIngest.clickhouse.coldStorage.bucket=<bucket> \
+  --set telemetryIngest.clickhouse.coldStorage.existingSecret=telemetry-gcs \
+  --set telemetryIngest.clickhouse.coldStorage.coldAfter=48h
+```
+
+What the chart does: a ConfigMap puts a `gcs` disk (ClickHouse's S3 disk type against GCS's S3-compatible API, keys read from the environment, `support_batch_delete=false` because GCS has none) with a local `gcs_cache` in front of it, and a storage policy `tiered` with volumes `default` (the local disk) and `cold` (the bucket). ClickHouse restarts when that configuration changes. The service gets `--storage-policy=tiered --cold-volume=cold --cold-after=<coldAfter>`, and on every start it puts the four big tables on that policy and sets their TTL to *move after `coldAfter`, delete after the retention*.
+
+Things to know:
+- A move is decided **per part**, by the part's newest row, and tables are partitioned by day, so data usually moves up to about a day after `coldAfter`.
+- `coldAfter` must be shorter than every retention (`--ttl-*`); the service refuses to start otherwise (it would delete data before moving it).
+- The service changes an existing table's policy with `MODIFY SETTING storage_policy`, which ClickHouse only allows when the new policy keeps the old one's volumes and disks: hence the volume named `default`.
+- Turning it off later stops new moves but does not bring data back; it stays in the bucket, and the tables keep the policy (so ClickHouse must keep its configuration, or it will not start the tables).
+- Queries over cold data are slower and cost bucket requests; the cache helps repeated reads.
+- The Cluster Topology tab (with `exposeClusterInfo`) shows a bucket disk as "Object storage", unlimited, with how much is stored on it.
+- Verified: the SQL and the move against a real ClickHouse with a second local disk (integration test `TestTieredStorage`), and the generated ClickHouse configuration (disks, keys from the environment, policy, move, reads, cache) against an S3-compatible server. **Not verified against real GCS**: its authentication and request behaviour. Try it on a throwaway bucket first.
+
+## Incidents API
+
+The lifecycle of an incident (the record that someone is dealing with it), kept by the service so that it is shared and survives a browser. Detection (`telemetry-ui/src/incidents`) finds trouble; this is where a found or reported incident is **opened, taken on, worked, resolved and closed**, with a timeline and references to the evidence.
+
+**Keys.** A project has a third kind of key beside ingest and read: a **manage** key (`manageKeys` in the projects file; `<cluster>.manage` in the hub's `telemetry-ingest-keys` Secret). Reading incidents works with a read key or a manage key; every change needs a manage key. They are separate so that the read key a browser holds can look and never touch. The manage key stays on the hub and is not copied to spokes. As everywhere in this API, a key for another project (or none) gets the same 403 for any project, and an incident of one project does not exist in another (404).
+
+| Endpoint | Key | What |
+|---|---|---|
+| `GET .../incidents` | read | list, newest first: `state=open,acknowledged` `app=` `severity=` `limit=` (1 to 200; looks through the 500 newest). `meta.skipped` appears if a record would not fold. |
+| `GET .../incidents/{id}` | read | the incident, with its evidence and the moves it may make now (`allowed_transitions`) |
+| `GET .../incidents/{id}/events` | read | the timeline: `after=<seq>` `limit=` (1 to 500) |
+| `GET .../incidents/{id}/evidence` | read | its evidence references |
+| `POST .../incidents` | manage | open one: `title` (required), `app`, `severity` (critical, warning (default), info), `summary`, `started_at`, `source` (manual (default) or detected), `dedupe_key` |
+| `PATCH .../incidents/{id}` | manage | change `title`, `severity`, `summary`, `assignee` (`""` clears it). A change that changes nothing is a 400 |
+| `POST .../incidents/{id}/transitions` | manage | `{"to": "...", "note": "...", "resolution": "..."}` |
+| `POST .../incidents/{id}/comments` | manage | `{"text": "..."}` |
+| `GET .../rules` | read or manage | every rule as it is in force for the project (see *Rules*) |
+| `PUT .../rules/{name}` | manage | `{"enabled": true, "percent": 40, "days": 7, "percentile": 95, "expected_version": 1}`: save a new version of one rule |
+| `POST .../incidents/{id}/analysis` | manage | no body: asks Claude for resolution steps and keeps them as a comment by `claude` (see below) |
+| `POST .../incidents/{id}/evidence` | manage | attach a reference (below) |
+| `DELETE .../incidents/{id}/evidence/{evidence_id}?reason=` | manage | detach one |
+
+Bodies are `application/json`, at most 64 KiB, and a field the call does not have is a 400, not ignored. `X-Actor: ana@example.com` says who is acting (1 to 64 letters, digits, spaces and `. _ @ + -`); it is recorded on each event, and defaults to `api`. It is **self-reported**: a key is shared by whoever holds it, so the actor is an attribution, not authentication.
+
+**States.** Anything else is a 409 that says what is allowed:
+
+```
+open          -> acknowledged, investigating, mitigated, resolved
+acknowledged  -> investigating, mitigated, resolved
+investigating -> mitigated, resolved
+mitigated     -> investigating (it came back), resolved
+resolved      -> closed, open (reopened)
+closed        -> open (reopened)
+```
+
+Resolving needs a `resolution` (`fixed`, `workaround`, `false_positive`, `duplicate`, `not_reproducible`); reopening needs a `note` saying why. The incident keeps `acknowledged_at` (when first taken on, also when it went straight to investigating), `mitigated_at` (first time), `resolved_at` and `closed_at` (latest; cleared on reopening) and `reopened` (a count), so time to acknowledge, mitigate and resolve can be worked out.
+
+**Evidence** is a pointer to where to look, never a copy of the data: `trace` (`trace_id`), `logs` (`service` and/or `query`, `severity`, `from`, `to`), `profile` (`service`, `profile_type` such as `cpu:nanoseconds`, `from`, `to`), `metric` (`metric`, `match`, `from`, `to`), `application` (`service`) and `url` (an `http(s)` address; `javascript:`, `data:`, relative addresses and addresses with credentials are refused, since it is shown as a link). Each kind takes only its own fields, and any may carry a `note`. The id is a hash of the reference, so attaching the same one twice is one (200, not 201). At most 100 per incident.
+
+**Changing safely.**
+- *Version.* Every incident has a `version` (the number of events so far). Send it back as `If-Match: "3"` or `expected_version` in the body; if somebody changed the incident meanwhile the answer is a 409 with `current_version`, and nothing is written. Without one, the change applies to whatever the incident is now.
+- *Idempotent create.* `dedupe_key` (for example `<application>|<start>` of a detected incident) makes creating the same incident twice return the first (200 instead of 201), so whatever finds incidents can say "this one" as often as it likes.
+- *Errors* are `{"error": "..."}`: 400 input, 401 no key, 403 wrong key, 404 no such incident, 409 state or version, 413 too big, 415 not JSON; a failure inside the service is a 500 with a plain sentence and nothing internal.
+
+```sh
+H="X-API-Key: $MANAGE_KEY"; B=http://telemetry-ingest/api/v1/projects/us/incidents
+id=$(curl -s -H "$H" -H 'Content-Type: application/json' -d '{"title":"frontend errors","app":"/k8s/shop/frontend","severity":"critical"}' $B | jq -r .data.id)
+curl -s -H "$H" -H 'Content-Type: application/json' -H 'X-Actor: ana' -d '{"to":"investigating","note":"looking at redis"}' $B/$id/transitions
+curl -s -H "$H" -H 'Content-Type: application/json' -d '{"kind":"trace","trace_id":"<32 hex>","note":"a failing request"}' $B/$id/evidence
+curl -s -H "$H" -H 'Content-Type: application/json' -d '{"to":"resolved","resolution":"fixed","note":"network policy removed"}' $B/$id/transitions
+```
+
+**How it is stored.** Nothing is updated in place. Every change is an **event** appended to `incident_events` (a plain MergeTree, no TTL: an incident is a record), and the incident as it stands is the fold of its events (`incident/fold.go`). That gives the timeline for free, makes every change a single append (ClickHouse has no row updates and no transactions), and means the rules above are the only way a state can come about: a log that breaks them does not fold, and is reported (500 on that incident, `meta.skipped` in the list) rather than shown wrongly. Restarts lose nothing.
+
+**Limits.**
+- **One replica.** "Read the incident, check the rule, append" is made safe by the service doing one change at a time, which is correct for the single replica this service runs as (the tables are not replicated either). The store refuses a repeated sequence number, which narrows the window for a second writer but is not atomic. Do not scale it out without a database that can refuse the second event.
+- **No delete.** Incidents are closed, not removed; a wrong reference can be detached and a wrong state reopened, and the timeline keeps both.
+- **The UI does not use it yet.** The telemetry UI's proxy passes only GET, so it can read incidents but not change them, and its detection page does not create them (the server-side detector below does). A write path from a UI needs its own decision on who may hold a manage key.
+- **No notifications**, assignment rules, SLA timers or links between incidents.
+
+### Rules
+
+A **rule** is a few settings that decide when a detector speaks, kept on the hub so that a person can change them **without a deploy**. There are three, all for right-sizing (below): `rightsize.memory`, `rightsize.cpu` and `rightsize.storage`. Each has:
+
+| Setting | Meaning | Limits |
+|---|---|---|
+| `enabled` | the rule is on | memory and CPU on by default, storage off |
+| `percent` | a container is over-provisioned when its use stayed **below** this share of its limit | above 0, at most 100 (default 50) |
+| `days` | how far back to look | 1 to 30 (default 7); metrics are kept for 14 days by default, so a longer window sees less than it asks for and the detector then leaves the container alone |
+| `percentile` | which of the highest uses to judge by: 95 is "the use exceeded only 5% of the time", 100 the highest there was | 50 to 100 (default 95; 100 for storage) |
+
+`GET /api/v1/projects/{project}/rules` lists all three with the settings in force, whether they were `saved`, the `version` (0 when nothing is saved), `updated_by` and `updated_at`, and the `default` they have when nothing is saved. `PUT .../rules/{name}` saves a new version (all four settings are required). Keys are the incidents API's: **a read key looks and a manage key changes**, and a key for another project, or for none, gets the same answer whatever the project. Who made a change is the `X-Actor` header (`api` without one) and when is the hub's clock. Every save is a **new version** and nothing is overwritten: the table `rule_versions` (migration 7) keeps the history, and the newest version is the one in force. With `expected_version` in the body (or an `If-Match` header; `0` means "I read the default") a save is refused with `409` and the current version when the rule moved on since it was read.
+
+What a project has not saved is the **default**: the built-in one, overlaid with `--rules-defaults` (a JSON object of rule name to the settings that differ, chart `telemetryIngest.rules.defaults`). A typo in it stops the service at start. The detector reads the rules at the start of each look, so a saved rule takes effect at the next one; **a failure to read the rules is an error and never the defaults**, so a rule someone tightened does not quietly loosen. The API is always there and needs no property; running the detector is `detection.rightsizing`.
+
+### Right-sizing
+
+`--detect-rightsize` (chart `telemetryIngest.detection.rightsizing.enabled`, off by default) opens an **information** incident (`<namespace>/<name>: memory over-provisioned`) for an application whose containers used far less of a resource than they were given, as the project's rules say. The node-agent already sends both sides:
+
+| Resource | Use | Given |
+|---|---|---|
+| memory | `container_resources_memory_rss_bytes` | `container_resources_memory_limit_bytes` |
+| CPU | rate of `container_resources_cpu_usage_seconds_total` (cores) | `container_resources_cpu_limit_cores` |
+| storage | `container_resources_disk_used_bytes` | `container_resources_disk_size_bytes`, per **volume** (a container's own filesystem is not one) |
+
+How it judges, because that is what decides whether a suggestion is safe:
+- **Peaks, not averages.** A gauge is read as the **highest reading of each step** (`MetricQuery.Max`), and the step grows with the window (`days x 5 minutes`, at most 2 hours), so a window is about 288 points a series. CPU can only be the average over a step, as a counter says no more. A rule then judges by a **percentile of those peaks**: the 95th ignores the one spike in twenty, 100 never does.
+- **The busiest pod sets each step**, and the containers of a pod (and the volumes) are judged apart.
+- **Not judged:** a container watched for less than four fifths of the window (it may be new), one with no limit, a limit under 32 MiB, 50m CPU or a 100 MiB volume (too little to give back), the namespaces in `--detect-rightsize-exclude`, and anything when the read was cut short by the series or point limit (a partial read would look quiet).
+- **The suggestion** is the use at the percentile plus **30% headroom**, rounded up (16 MiB, 50m, 1 GiB) and never above what it has. It says what it measured and over how long, and that it comes from usage alone: a rare large request, a start-up or a monthly batch is not in a window of days. A volume usually cannot be made smaller, so a storage incident says it is for the next one.
+- **Not nagging:** one incident per application and resource, kept apart from the other kinds (`rightsize:<resource>:...` keys), is not opened again while one is active, nor for the rule's `days` after one was resolved or closed. It looks only every `--detect-rightsize-every` (1 hour, at least 10 minutes) as it reads days of metrics, and a look that failed is tried again at the next tick.
+
+### Analysis with Claude
+
+`POST .../incidents/{id}/analysis` sends one incident to the Anthropic Messages API and keeps what comes back as a **comment by the actor `claude`**, so it shows in the timeline like anything a person wrote. It is **off** unless the service is given a key (`--analysis-key-file`, the chart's `telemetryIngest.analysis`); without one the call answers `501`.
+
+**What leaves the cluster is decided in one place, `analysis.Prompt`:** the incident's title, severity, state, source, application and times, the summary the detector wrote (what was measured), and **where** its evidence points (an application, "logs of X (severity error)", "a trace", "a link", a metric name). **Not** sent: log lines, traces, search text, web addresses, evidence notes, people's names (assignee, who added evidence), the dedupe key, and the project name. The incident text goes in as *data*, and the instructions tell the model not to follow anything inside it. The prompt asks for four things: likely cause (and how sure), numbered resolution steps with `kubectl` commands, how to confirm, and when to escalate. The comment begins by saying Claude wrote it, with which model, and that it has not seen logs, traces or the cluster.
+
+- **A manage key is needed** (the answer is written to the incident, and the call costs money). The UI asks for it per click and keeps it nowhere.
+- **Limits:** one incident is analysed at most every **2 minutes** (`429` with `Retry-After`; a failed analysis does not start the wait), and at most **4** run at once across all projects. One may take up to 3 minutes (the model thinks first); the UI's proxy allows 200 seconds.
+- **Errors say what kind and never repeat the key or what the API said:** the key was refused (`502`), rate limited (`429`), unreachable (`502`), the model declined, the answer was cut off, or "the analysis failed". The comment is cut to the 4000 characters an incident accepts, and control characters are removed.
+- **Model and cost:** `--analysis-model` (default `claude-opus-5-5`); each call is one request of about a page of input and a short answer, plus the model's thinking. Use a cheaper model by naming it (for example `claude-sonnet-5-5`).
+- The service uses the official Anthropic Go SDK, which needs **Go 1.25**: `go.mod` and the Dockerfile moved from 1.23. The SDK sends the key as a bearer token.
+
+Not done: server-side refusal fallbacks (a refusal is reported as "declined"), streaming, and running it on every new incident (it is on demand only, so nothing is sent unless a person asks).
+
+## Incident detection (server side)
+
+The incident page finds incidents in the browser, while it is open (`telemetry-ui/src/incidents/detect.js`). Switched on, the service does the same on a timer and **opens** the incidents itself, through the incident manager above, so one is there when nobody is looking. Off by default: `--detect-interval=0`.
+
+**What it judges.** An application's inbound HTTP requests (`container_http_inbound_requests_total`, and the duration histogram for slow ones), the server's own view of its callers. An objective such as "99.9% of requests should not fail" leaves a 0.1% error budget; the **burn rate** is how many times faster than allowed it is being used (1.44% failing = 14.4x). An incident is declared when a 5-minute window **and** a 1-hour window both burn at `--detect-burn` (14.4: a 30-day budget gone in two days) or more: the long window says it matters, the short one says it is still happening. Availability (5xx and gRPC server-side failures; a 4xx is the caller's) and latency (slower than `--detect-latency-seconds`, read from the histogram's bound at or above it) are judged separately and merged when they overlap. The algorithm is the page's, ported to Go (`detect/`), so the two agree.
+
+**What it opens.** For each breach, an incident with `source: detected`, `app` the application id, a title such as `shop/web: availability objective burning`, severity `critical` when the burn reached twice the threshold and `warning` otherwise, `started_at` the first minute that was itself burning, and a summary in plain words (how many requests, what share failed or were slow, how fast the budget burned). Two evidence references are attached: the application, and its error logs around the incident. The actor is `detector`.
+
+**Silent applications.** The same detector opens an incident for an application that has **stopped sending data**, found by putting what the
+[cluster collector](23-cluster-collector.md) says a workload is *set to run* beside what the node-agent still sends from it (its memory gauge, one
+series per container). It is the Applications page's "Silent" status, narrowed to what is worth an incident:
+
+| Case | Incident? | Title, severity |
+|---|---|---|
+| Set to run N (N > 0), fewer are ready, and nothing is sending | **yes** | `shop/payment: not ready (0 of 3)`, critical when none is ready, else warning; the summary says why the pods are not ready (`CrashLoopBackOff (OOMKilled) ×3`, `Unschedulable`, ...) |
+| Ready, was sending earlier in the last hour, and nothing is now | **yes** | `shop/ads: ready but sending no data`, warning |
+| Scaled to zero (set to run nothing) | no | a decision, not a failure |
+| Ready and **never** seen sending | no | the node-agent may not cover it; an incident for every such workload would be noise |
+| A cron job | no | idle between runs |
+| Removed from the cluster | no | |
+| Namespaces matching `--detect-silence-exclude` | no | the platform's own, by default (`kube-*`, `gke-*`, `istio-system`, ...) |
+
+Not on every look: an application is opened once it has been silent for `--detect-silence-after` (5 minutes) by the detector's **own** count, from its first
+sight of it, so a rollout, a blip or a restart of the service does not open one; the incident's `started_at` is nevertheless when the application **last sent**,
+when that is known. An application that starts sending again resets the count. Nothing is judged, and nothing opened, when:
+- there is **no inventory**, or the collector has not reported for ten minutes: "stopped sending" cannot then be told from "scaled down", and guessing would open
+  an incident for every scale-down;
+- **nothing at all is sending**: that is the node-agent or the way to the hub, which is not an application's incident (the UI's banner says it once); or
+- the project has no memory gauge.
+
+A silence incident is kept apart from a burn-rate one: an application with one open still gets the other. Each has its own `dedupe_key` (`silence:...` and `detect:...`).
+Like the others, it is never closed by the detector, and one a person resolves while the application is still silent is not opened again at once.
+
+**Dependencies that callers cannot connect to** (`--detect-deps`, off by default). A database that has stopped accepting connections is not an HTTP service, and the application in front of it may answer with a redirect to an error page, which is not a 5xx: no request metric shows it, so the burn-rate rule never fires. What shows it is the callers' side. The node-agent counts every connect that failed (`container_net_tcp_failed_connects_total`, by the address dialled) and every one that worked, and the detector opens an incident when, over five minutes, at least `--detect-deps-share` (20%) of the connection attempts into an application fail and at least `--detect-deps-min-failed` (5) did, for at least two minutes. This is the UI's "Connections failing" alert rule, but it opens a **recorded** incident that outlasts the browser tab, and it is kept apart from the other two kinds (`deps:...` keys).
+
+The address dialled is turned into an application the way the UI's map does it: a pod's address is the application whose container listens there (`container_net_tcp_listen_info`), and a **Service's address is learned from the connections that worked**, each of which pairs the address dialled with the pod reached. That table is learned from the whole look-back, so a Service that has been refusing for an hour is still known: it did connect before. An address nothing can be named for (a service outside the cluster) is **left out** rather than guessed at, as are an application's connections to itself and the namespaces in `--detect-deps-exclude`.
+
+The incident is titled `<namespace>/<name>: connections failing`, is critical when 90% or more of the attempts failed and a warning otherwise, and points at the dependency, its busiest callers and the busiest caller's error logs. A dependency **scaled down on purpose fails its callers' connections the same**, and is reported: callers still depend on it. When the cluster collector's inventory is current the summary says what it reports ("set to run no replicas", "set to run 1 and 0 are ready", or "all of its pods are ready"), so whoever is on call can tell a meant scale-down from an outage and close it; without it the incident says nothing about that.
+
+**Not opening twice.** Each look re-reads the last `--detect-lookback` (3 h, at least 1 h 5 min), so the same trouble is seen again and again. A breach is **not** opened when
+- it ended more than `--detect-max-age` (30 min) ago when first seen: that is history, and switching detection on must not open an incident for everything of the last three hours;
+- the detector already has an incident for that application that is **active** (not resolved or closed): a trouble that outlasts the lookback has a start that moves forward on every look, and stays one incident; or
+- the detector's incident for it was resolved or closed **after the breach began**: resolving something that is still burning does not open another a minute later.
+
+Creation also carries a `dedupe_key` (application and start). An incident a person opened is not considered either way: it may be stale, and a duplicate is cheaper than a missed incident.
+
+**It never changes an incident.** It does not acknowledge, resolve or comment: whoever is on call does. So an incident that is never resolved keeps its application from being opened again until it is.
+
+| Flag (chart value `telemetryIngest.detection.*`) | Default | |
+|---|---|---|
+| `--detect-interval` (`enabled`, `interval`) | `0` (off); chart `1m` when enabled | how often to look |
+| `--detect-lookback` | `3h` | how far back each look reaches |
+| `--detect-max-age` | `30m` | how recently an already-ended breach may have ended |
+| `--detect-availability` | `0.999` | share of requests that should not fail |
+| `--detect-latency` / `--detect-latency-seconds` | `0.999` / `0.5` | share that should be faster than the limit, and the limit |
+| `--detect-burn` | `14.4` | burn rate that declares an incident |
+| `--detect-silence-after` (`silence.after`) | `5m` | how long an application must be silent before an incident is opened; `0` switches silence detection off, else at least `1m` |
+| `--detect-silence-exclude` (`silence.exclude`) | the platform's namespaces | a regular expression for namespaces not judged for silence; empty judges all |
+| `--detect-deps` (`dependencies.enabled`) | off | also open incidents for applications that callers cannot connect to; **nothing is passed to the service while it is off**, so an image without it still starts |
+| `--detect-deps-share` (`dependencies.share`) | `0.2` | the share of connection attempts into an application that must fail (0 to 1) |
+| `--detect-deps-min-failed` (`dependencies.minFailed`) | `5` | failed connections in five minutes before the share means anything |
+| `--detect-rightsize` (`rightsizing.enabled`) | off | also open information incidents for over-provisioned containers; **nothing is passed while it is off** |
+| `--detect-rightsize-every` (`rightsizing.every`) | `1h` | how often it looks (at least `10m`) |
+| `--detect-rightsize-exclude` (`rightsizing.exclude`) | the platform's namespaces | namespaces not judged; empty judges all |
+| `--rules-defaults` (`telemetryIngest.rules.defaults`) | built-in | JSON of rule name to the settings that differ, such as `{"rightsize.memory":{"percent":40}}`; passed only when given |
+| `--analysis-key-file` (`analysis.enabled`, `analysis.existingSecret`, `analysis.secretKey`) | off | a file holding an Anthropic API key: switches on analysis of incidents with Claude; the chart mounts your Secret (`kubectl -n monitoring create secret generic anthropic-api-key --from-literal=apiKey=<key>`) as that file; nothing is passed while it is off |
+| `--analysis-model` (`analysis.model`) | `claude-opus-5-5` | the model that writes the analysis |
+| `--detect-deps-exclude` (`dependencies.exclude`) | the platform's namespaces | a regular expression for namespaces whose applications are not judged for failing connections; empty judges all |
+
+Every project in the projects file is looked at, with the same objectives (the page's per-application objectives are per browser and are not known here). The service must have a read of the metrics and write of incidents: it uses the store directly, so no key is involved.
+
+**Limits.**
+- **One replica**, as for the incident API: "check, then append" is one change at a time inside the process. Two replicas would each open their own incident (the `dedupe_key` makes the same start one, but two replicas can see different starts).
+- **Request metrics, silence and failing connections.** Other trouble (a disk filling, a queue) is not detected; that would need rules of a different kind. Silence needs the cluster collector. Failing connections need the node-agent's connection and listen-address metrics; the collector only adds the note about whether it was meant, and a dependency outside the cluster, whose address no container listens on, is not named and so not judged.
+- **A burn-rate breach needs requests.** An application that stopped serving has no share to judge: that is what the silence rule above is for. An agent that stopped sending altogether is still not reported here (the UI's "node-agent is not set up" notice is the signal for that).
+- **A quiet minute counts as no data**, and an application with fewer than 20 requests in a window is not judged (`MinRequests`), so a rarely called service cannot page on one failure.
+- **Not stored**: the detector keeps nothing of its own between looks; everything it knows is the metrics and the incident log, so a restart loses nothing.
+
 ## Configuration
 
 Flags (`--help` lists all): `--listen`, `--grpc-listen`, `--projects-file`,
 `--clickhouse-addr`, `--clickhouse-database`, `--clickhouse-user`,
-`--clickhouse-password-file`, `--clickhouse-tls`, the four `--ttl-*`,
+`--clickhouse-password-file`, `--clickhouse-tls`, the four `--ttl-*`, `--ttl-databases`, `--ttl-inventory`, `--storage-policy`, `--cold-volume`, `--cold-after`, `--expose-cluster-info`, `--detect-*` (see above),
 `--batch-rows`, `--max-buffered-rows`, `--flush-interval`, `--max-body-bytes`.
 
 `/healthz` answers as soon as the process runs, so a ClickHouse outage does not
@@ -305,6 +531,9 @@ helm upgrade --install spoke deploy/platform-mvp/chart/spoke --kube-context <spo
 ```
 
 ### Delivering the key
+
+> **Preferred: enroll the cluster from the UI** (Configuration, Clusters): a one-time token and one command, no key copied by hand, a key per cluster that
+> can be revoked. See [24-enrollment.md](24-enrollment.md). What follows is the older way, which still works and uses the project's own ingest key.
 
 `copy-telemetry-credentials.sh <project> [spoke-context] [hub-context]` copies
 `<project>.ingest` from the hub's Secret `telemetry-ingest-keys` into Secret
@@ -579,6 +808,44 @@ use a stub, so they do not prove the map against a real node-agent's data.
 - **Clustered ClickHouse.** Tables are plain `MergeTree` and
   `ReplacingMergeTree`; replicated and distributed variants are not created.
 - **Automatic key delivery.** `copy-telemetry-credentials.sh` is run by hand or
-  from the Makefile. A hub controller that pushes the key to each spoke through
-  the connection the hub already holds (and restarts the agents on rotation)
-  would remove that step; it is not written.
+  from the Makefile, and enrollment ([24-enrollment.md](24-enrollment.md)) replaces it with a command the cluster runs itself. A hub controller that
+  pushes the key to each spoke through the connection the hub already holds (and restarts the agents on rotation) would remove that step; it is not written.
+
+## Incident timing, MTTR and the instant summary
+
+Every incident carries `timing`: `detect_seconds` (start of the trouble → opened), `acknowledge_seconds` (opened → first taken on),
+`mitigate_seconds` and `resolve_seconds` (start of the trouble → first mitigated / last resolved). A stage that has not happened is absent.
+
+`GET /api/v1/projects/{project}/incidents/stats?days=7` (1–90; a read key) gives, over the window, how many incidents were opened, resolved
+and are still open, and MTTD, MTTA, MTTM and MTTR as count, mean, median, p90 and max (MTTR also by severity). Incidents resolved as
+`false_positive` or `duplicate` are counted apart and left out of MTTR. Only the newest 500 incidents are read; `partial: true` says they did
+not reach back to the start of the window.
+
+`GET /api/v1/projects/{project}/incidents/{id}/summary` (a read key) is the incident's **instant summary**, computed in the service with no model:
+a one-line headline (state, how long, and the most likely related change), the timing, up to five **findings** ranked by how often that kind of
+thing is the cause and how close to the start it happened, a merged **timeline**, and the **gaps** (what could not be read or was not there).
+It looks from 30 minutes before the start of the trouble to 5 minutes after its resolution (or now), at most a day of the incident. Its sources:
+
+| Source | From | Needs |
+|---|---|---|
+| Rollouts | the workload's inventory history: versions whose `generation` went up, with the image change | the cluster collector |
+| Kubernetes events | events about the workload, its ReplicaSets and pods, grouped by reason | the cluster collector (`--events=all` for Normal ones) |
+| Process lineage | log records with `log.source=process` from fleet-node-agent: OOM kills, abnormal exits, binaries run for the first time, fork bursts | fleet-node-agent with `--process-lineage` |
+
+A source that fails is named in the gaps and the rest is answered. The Claude analysis (`POST .../analysis`) is unchanged and separate.
+
+To turn process lineage on in a spoke, run fleet-node-agent (`nodeAgent.image.repository`) with
+`--set 'nodeAgent.extraArgs={--process-lineage}'`; its records go through the agent's logs, so the spoke must be sending logs to the hub.
+
+## The read API's description, client and Claude skill
+
+The logs, traces and metrics read API is described in `platform-mvp/telemetry-client/api/swagger.json` (Swagger 2.0). The module there holds
+the Go client generated from it (go-swagger), a thin wrapper (`fleet.New(hub, project, readKey)`) and `fleetctl`, a command-line tool; see its
+README. `server/apispec_test.go` checks that the server answers every operation the description has and that every logs/traces/metrics route
+is described, and writes the answers as the client's test fixtures (`-update-fixtures`). Metric label matchers can also be given as a repeated
+`match=<label>=<value>`, the form the description uses; `match.<label>=<value>` keeps working.
+
+The Claude Code skill `.claude/skills/fleet-telemetry` lets Claude answer questions about the data ("what errors did checkout log in the
+last hour?") by running `fleetctl` with a project's read key from `FLEET_READ_KEY_FILE`; it never sees or prints the key. The skill only
+reads, but it applies only when it is used: what else Claude may run in a session is up to Claude Code's permission settings, so keep
+cluster-changing commands (kubectl, helm) behind a prompt there.

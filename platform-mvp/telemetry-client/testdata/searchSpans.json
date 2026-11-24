@@ -1,0 +1,44 @@
+{
+  "data": [
+    {
+      "time": "2026-11-23T10:00:00Z",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "name": "POST /checkout",
+      "kind": "SPAN_KIND_SERVER",
+      "service": "/k8s/shop/checkout",
+      "duration_ns": 1250000000,
+      "status_code": "ERROR",
+      "status_message": "upstream timeout",
+      "resource_attributes": {
+        "container.id": "/k8s/shop/checkout-7d9f8-x2bq4/app"
+      },
+      "span_attributes": {
+        "http.status_code": "504"
+      },
+      "event_times": [
+        "2026-11-23T10:00:01Z"
+      ],
+      "event_names": [
+        "exception"
+      ],
+      "event_attributes": [
+        {
+          "exception.type": "Timeout"
+        }
+      ]
+    },
+    {
+      "time": "2026-11-23T10:00:00.01Z",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "b7ad6b7169203331",
+      "parent_span_id": "00f067aa0ba902b7",
+      "name": "POST /pay",
+      "kind": "SPAN_KIND_CLIENT",
+      "service": "/k8s/shop/checkout",
+      "duration_ns": 1200000000,
+      "status_code": "ERROR"
+    }
+  ]
+}
+

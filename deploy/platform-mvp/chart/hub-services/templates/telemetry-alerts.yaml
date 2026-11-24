@@ -106,7 +106,12 @@ spec:
               value: /var/lib/telemetry-alerts/state.json
             - name: INTERVAL_SECONDS
               value: {{ $a.intervalSeconds | quote }}
-            {{- with $a.alertmanagerUrl }}
+            {{- /* the Alertmanager of this chart, unless another is named */ -}}
+            {{- $am := $a.alertmanagerUrl }}
+            {{- if and (not $am) $.Values.alertmanager.enabled }}
+            {{- $am = printf "http://alertmanager.%s.svc.cluster.local:9093" $.Values.alertmanager.namespace }}
+            {{- end }}
+            {{- with $am }}
             - name: ALERTMANAGER_URL
               value: {{ . | quote }}
             {{- end }}

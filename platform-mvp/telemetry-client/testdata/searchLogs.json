@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "time": "2026-11-23T10:00:00Z",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "severity": "ERROR",
+      "severity_number": 17,
+      "service": "/k8s/shop/checkout",
+      "body": "payment failed: upstream timeout",
+      "resource_attributes": {
+        "container.id": "/k8s/shop/checkout-7d9f8-x2bq4/app"
+      },
+      "log_attributes": {
+        "log.source": "stdout"
+      }
+    }
+  ]
+}
+

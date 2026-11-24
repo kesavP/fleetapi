@@ -1,6 +1,7 @@
 // Package project maps API keys to projects. A project is one fleet cluster
 // (or any other telemetry source); its ingest keys let an agent write, its
-// read keys let a caller query. A key is valid for exactly one project, and a
+// read keys let a caller query, and its manage keys let a caller change the
+// project's incidents (a manage key also reads them). A key is valid for exactly one project, and a
 // key that is unknown is rejected: there is no default project.
 package project
 
@@ -12,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 )
@@ -24,6 +26,9 @@ type Entry struct {
 	Name       string   `json:"name"`
 	IngestKeys []string `json:"ingestKeys"`
 	ReadKeys   []string `json:"readKeys"`
+	// ManageKeys may change the project's incidents. They are kept apart from read keys on purpose: a read key is held by a browser, and
+	// must never be able to change anything.
+	ManageKeys []string `json:"manageKeys"`
 }
 
 type file struct {
@@ -33,6 +38,8 @@ type file struct {
 type snapshot struct {
 	ingest map[[32]byte]string
 	read   map[[32]byte]string
+	manage map[[32]byte]string
+	names  map[string]bool // the projects the file lists
 }
 
 type Registry struct {
@@ -40,6 +47,20 @@ type Registry struct {
 	mu   sync.RWMutex
 	cur  *snapshot
 	raw  [32]byte
+	// issued: ingest keys made by enrollment (hash -> project), which are not in the file. They are only good for a project the file lists.
+	issued map[[32]byte]string
+}
+
+// SetIssuedIngest replaces the ingest keys that enrollment has issued (hash of the key to its project). They are not in the projects file and
+// are taken up as soon as this is called; a key whose project the file no longer lists is not accepted.
+func (r *Registry) SetIssuedIngest(m map[[32]byte]string) {
+	cp := make(map[[32]byte]string, len(m))
+	for h, p := range m {
+		cp[h] = p
+	}
+	r.mu.Lock()
+	r.issued = cp
+	r.mu.Unlock()
 }
 
 // Load reads and validates path. It fails when the file is unusable, so a
@@ -102,7 +123,7 @@ func Parse(data []byte) (*snapshot, error) {
 	if len(f.Projects) == 0 {
 		return nil, fmt.Errorf("projects file lists no projects")
 	}
-	s := &snapshot{ingest: map[[32]byte]string{}, read: map[[32]byte]string{}}
+	s := &snapshot{ingest: map[[32]byte]string{}, read: map[[32]byte]string{}, manage: map[[32]byte]string{}, names: map[string]bool{}}
 	names := map[string]bool{}
 	used := map[[32]byte]string{}
 	add := func(dst map[[32]byte]string, name, kind, key string) error {
@@ -125,7 +146,8 @@ func Parse(data []byte) (*snapshot, error) {
 			return nil, fmt.Errorf("project %q is listed twice", e.Name)
 		}
 		names[e.Name] = true
-		if len(e.IngestKeys)+len(e.ReadKeys) == 0 {
+		s.names[e.Name] = true
+		if len(e.IngestKeys)+len(e.ReadKeys)+len(e.ManageKeys) == 0 {
 			return nil, fmt.Errorf("project %q has no keys", e.Name)
 		}
 		for _, k := range e.IngestKeys {
@@ -138,14 +160,46 @@ func Parse(data []byte) (*snapshot, error) {
 				return nil, err
 			}
 		}
+		for _, k := range e.ManageKeys {
+			if err := add(s.manage, e.Name, "manage", k); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return s, nil
 }
 
-func (r *Registry) IngestProject(key string) (string, bool) { return r.lookup(key, true) }
-func (r *Registry) ReadProject(key string) (string, bool)   { return r.lookup(key, false) }
+func (r *Registry) IngestProject(key string) (string, bool) { return r.lookup(key, kindIngest) }
+func (r *Registry) ReadProject(key string) (string, bool)   { return r.lookup(key, kindRead) }
+func (r *Registry) ManageProject(key string) (string, bool) { return r.lookup(key, kindManage) }
 
-func (r *Registry) lookup(key string, ingest bool) (string, bool) {
+// Projects lists every project the file names, in order of name. The incident detector looks at each of them.
+func (r *Registry) Projects() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	for _, m := range []map[[32]byte]string{r.cur.ingest, r.cur.read, r.cur.manage} {
+		for _, name := range m {
+			seen[name] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+type kind int
+
+const (
+	kindIngest kind = iota
+	kindRead
+	kindManage
+)
+
+func (r *Registry) lookup(key string, k kind) (string, bool) {
 	if key == "" {
 		return "", false
 	}
@@ -153,9 +207,17 @@ func (r *Registry) lookup(key string, ingest bool) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	m := r.cur.read
-	if ingest {
+	switch k {
+	case kindIngest:
 		m = r.cur.ingest
+	case kindManage:
+		m = r.cur.manage
 	}
 	name, ok := m[h]
+	if !ok && k == kindIngest {
+		if p, found := r.issued[h]; found && r.cur.names[p] {
+			return p, true
+		}
+	}
 	return name, ok
 }

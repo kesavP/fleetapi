@@ -66,10 +66,15 @@ export async function getTrace(client, id) {
   return Array.isArray(rows) ? rows : []
 }
 
-/** The names a filter can offer: services with traces or logs in the window. Either source failing leaves the other. */
-export async function serviceNames(client, { seconds, now } = {}) {
+/**
+ * The names a filter can offer: services with traces or logs in the window. Either source failing leaves the other. With `strict`,
+ * both failing is an error (the reason of the first), not an empty list: a caller that must not mistake "could not read" for
+ * "there are none" asks for that.
+ */
+export async function serviceNames(client, { seconds, now, strict = false } = {}) {
   const range = windowRange(seconds, now)
   const settled = await Promise.allSettled([client.get('traces/services', range), client.get('logs/services', range)])
+  if (strict && settled.every((r) => r.status === 'rejected')) throw settled[0].reason
   const names = new Set()
   for (const r of settled) if (r.status === 'fulfilled' && Array.isArray(r.value)) r.value.forEach((n) => n && names.add(n))
   return [...names].sort((a, b) => a.localeCompare(b))

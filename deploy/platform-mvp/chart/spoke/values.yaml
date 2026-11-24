@@ -97,6 +97,42 @@ metricsAgent:
     requests: { cpu: 20m, memory: 64Mi }
     limits: { cpu: 200m, memory: 256Mi }
 
+# Reports what is IN this cluster (nodes, namespaces, workloads, pods, volume claims, HPAs, KEDA ScaledObjects, events) to the hub's
+# telemetry-ingest: one read-only Deployment, beside the node-agent (which reports what is happening on each node). Off by default.
+# It uses the node-agent's namespace, hub URL and key Secret unless told otherwise, so the namespace and the Secret must exist first (see
+# nodeAgent.namespace / createNamespace). It needs an image of its own: `make build-cluster-collector-image push-cluster-collector`.
+clusterCollector:
+  enabled: false
+  namespace: telemetry-agent
+  # Empty: nodeAgent.collectorURL.
+  collectorURL: ""
+  # This cluster's name as the hub lists it (lower-case letters, digits and . _ -).
+  clusterName: ""
+  # This cluster's ingest key, as for the node-agent. Mounted as a file, never put in values or the environment.
+  apiKeySecret:
+    name: hub-telemetry-credentials
+    key: apiKey
+  tlsSkipVerify: false
+  caSecret:
+    name: ""
+    key: ca.crt
+  image:
+    repository: ""
+    # No default: pin a version you have built.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # How often it looks, and how often it sends everything again (which also repairs a report that was lost).
+  interval: 30s
+  resync: 30m
+  # warning (what went wrong), all (scaling, scheduling, pulling too) or none.
+  events: warning
+  # Namespaces to leave out entirely.
+  excludeNamespaces: []
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  extraArgs: []
+
 admissionPolicies:
   enabled: true
   platformAdminSubjects:

@@ -6,12 +6,15 @@
 //   no-traffic     a service that was getting calls now gets (almost) none. It may be down, or its callers may be.
 //   refused        a high share of the connections into it fail (refused, reset, timed out): up but not accepting.
 //   errors         a high share of the calls it answers fail with a 5xx or a gRPC server failure.
-//   no-instances   it was listening during the baseline or recent window and no longer is: its pods are gone.
+//   no-instances   it was listening during the baseline or recent window and no longer is: it has stopped sending data. A warning, not a
+//                  failure judged from the absence: scaled down on purpose looks the same. (The Applications page says which, from the inventory.)
 //   telemetry-gone ALL traffic disappeared at once. That points at the agents or the pipeline, not at every service, so it
 //                  replaces the per-service "absence" rules instead of adding to them.
 //
 // Absence is the hard part: "no traffic" is also what a failed read looks like. A rule that depends on something being absent
 // is skipped when either look was incomplete (a counter failed or was cut short), and nothing here treats a missing read as zero.
+
+import { workloadForId } from '../map/workload.js'
 
 export const DEFAULTS = {
   recentSeconds: 300, //          the window being judged
@@ -40,14 +43,15 @@ export const RULES = {
   'no-traffic': 'Stopped receiving traffic',
   refused: 'Connections failing',
   errors: 'Calls failing',
-  'no-instances': 'No running instances',
+  'no-instances': 'Stopped sending data',
   'telemetry-gone': 'No telemetry',
 }
 
 const sum = (xs, f) => xs.reduce((a, x) => a + f(x), 0)
 const activity = (e) => (e.rps ?? 0) + e.connPerSec
 const round = (n, d = 3) => Math.round(n * 10 ** d) / 10 ** d
-const labelOf = (id) => (id.startsWith('/k8s/') ? id.split('/').slice(2).join('/') : id)
+// "shop/cartservice" for a Kubernetes workload, "nginx" for a unit on a plain host, the id itself for anything else
+const labelOf = (id) => (id.startsWith('/k8s/') ? id.split('/').slice(2).join('/') : (workloadForId(id) || { label: id }).label)
 
 function inboundOf(result, id) {
   const edges = result.edges.filter((e) => e.to === id)
@@ -122,7 +126,7 @@ export function evaluate({ recent, baseline }, config = {}) {
       const was = recent.listeners.seen.includes(id) || baseline.listeners.seen.includes(id)
       if (was && !recent.listeners.fresh.includes(id)) {
         noInstances = true
-        add('no-instances', id, 'critical', `${labelOf(id)} was listening and no instance has reported a listen address for the last ${Math.round(c.recentSeconds / 60)} minutes: its pods may be gone.`, {
+        add('no-instances', id, 'warning', `${labelOf(id)} was listening and no instance has reported a listen address for the last ${Math.round(c.recentSeconds / 60)} minutes: it has stopped sending data (scaled down, or gone).`, {
           lastTrafficPerSec: round(before.activity),
           baselineCallers: before.callers,
         })

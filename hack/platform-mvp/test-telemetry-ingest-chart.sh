@@ -96,9 +96,9 @@ python3 - "$work/gke.yaml" <<'PY'
 import sys, yaml, json
 secret = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "Secret" and d["metadata"]["name"] == "telemetry-ingest-keys")
 data = secret["stringData"]
-assert sorted(k for k in data if k != "projects.json") == ["gke.ingest", "gke.read"], sorted(data)
+assert sorted(k for k in data if k != "projects.json") == ["gke.ingest", "gke.manage", "gke.read"], sorted(data)
 assert [p["name"] for p in json.loads(data["projects.json"])["projects"]] == ["gke"]
-print("ok: only gke.ingest and gke.read, and one project")
+print("ok: only gke.ingest, gke.read and gke.manage, and one project")
 PY
 
 echo "== the projects file matches the generated keys"
@@ -111,7 +111,156 @@ projects = json.loads(data["projects.json"])["projects"]
 assert [p["name"] for p in projects] == ["us", "eu"], projects
 for p in projects:
     assert data[p["name"] + ".ingest"] == p["ingestKeys"][0] and data[p["name"] + ".read"] == p["readKeys"][0]
-    assert len(p["ingestKeys"][0]) >= 16 and p["ingestKeys"][0] != p["readKeys"][0]
+    assert data[p["name"] + ".manage"] == p["manageKeys"][0], "the projects file and the Secret disagree about the manage key"
+    keys = [p["ingestKeys"][0], p["readKeys"][0], p["manageKeys"][0]]
+    assert all(len(k) >= 16 for k in keys) and len(set(keys)) == 3, "the three kinds of key must differ (a key is valid for one kind of access)"
 print("ok: one ingest and one read key per fleet cluster, matching the projects file")
 PY
+echo "== cluster details are shared only when asked for"
+render --set telemetryIngest.enabled=true | grep -q -- "--expose-cluster-info" && fail "--expose-cluster-info rendered by default"
+render --set telemetryIngest.enabled=true --set telemetryIngest.exposeClusterInfo=true | grep -q -- "--expose-cluster-info" || fail "--expose-cluster-info missing when exposeClusterInfo=true"
+
+echo "== incident detection: off by default, and its settings reach the service when on"
+render --set telemetryIngest.enabled=true | grep -q -- "--detect-" && fail "a --detect- flag rendered by default"
+det="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.interval=30s --set telemetryIngest.detection.burn=6 --set telemetryIngest.detection.availability=0.99)"
+for want in "--detect-interval=30s" "--detect-burn=6" "--detect-availability=0.99" "--detect-lookback=3h" "--detect-latency=0.999" "--detect-latency-seconds=0.5" "--detect-max-age=30m"; do
+  grep -q -- "$want" <<<"$det" || fail "$want missing with detection on"
+done
+for want in "--detect-silence-after=5m" "--detect-silence-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$det" || fail "$want missing with detection on"
+done
+sil="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.silence.after=0 --set telemetryIngest.detection.silence.exclude=)"
+grep -qF -- "--detect-silence-after=0" <<<"$sil" || fail "silence cannot be switched off"
+grep -qF -- '"--detect-silence-exclude="' <<<"$sil" || fail "an empty exclusion (none) was not passed on: $(grep detect-silence <<<"$sil")"
+echo "ok: no detection flags by default; interval, burn, objectives, lookback and the silence settings pass through when enabled"
+
+echo "== dependency detection: nothing is passed on unless it is switched on, and its settings reach the service when on"
+grep -q -- "--detect-deps" <<<"$det" && fail "a --detect-deps flag rendered with detection on but dependency detection off: an image without it would not start"
+dep="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.dependencies.enabled=true --set telemetryIngest.detection.dependencies.share=0.5 --set telemetryIngest.detection.dependencies.minFailed=20)"
+for want in "- --detect-deps" "--detect-deps-share=0.5" "--detect-deps-min-failed=20" "--detect-deps-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$dep" || fail "$want missing with dependency detection on"
+done
+dep0="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.dependencies.enabled=true --set telemetryIngest.detection.dependencies.exclude=)"
+grep -qF -- '"--detect-deps-exclude="' <<<"$dep0" || fail "an empty exclusion (none) was not passed on: $(grep detect-deps <<<"$dep0")"
+render --set telemetryIngest.enabled=true --set telemetryIngest.detection.dependencies.enabled=true | grep -q -- "--detect-deps" && fail "dependency flags rendered while detection itself is off"
+echo "ok: dependency detection flags appear only when it is on (and detection is), with its settings"
+
+echo "== right-sizing and rule defaults: nothing unless switched on, then the flags"
+grep -q -- "--detect-rightsize" <<<"$det" && fail "a --detect-rightsize flag rendered with detection on but right-sizing off: an image without it would not start"
+grep -q -- "--rules-defaults" <<<"$det" && fail "--rules-defaults rendered with none given"
+rs="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true --set telemetryIngest.detection.rightsizing.every=30m)"
+for want in "- --detect-rightsize" "--detect-rightsize-every=30m" "--detect-rightsize-exclude=^(kube-|gke-"; do
+  grep -qF -- "$want" <<<"$rs" || fail "$want missing with right-sizing on"
+done
+rs0="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true --set telemetryIngest.detection.rightsizing.exclude=)"
+grep -qF -- '"--detect-rightsize-exclude="' <<<"$rs0" || fail "an empty exclusion (none) was not passed on: $(grep detect-rightsize <<<"$rs0")"
+render --set telemetryIngest.enabled=true --set telemetryIngest.detection.rightsizing.enabled=true | grep -q -- "--detect-rightsize" && fail "right-sizing flags rendered while detection itself is off"
+rd="$(render --set telemetryIngest.enabled=true --set 'telemetryIngest.rules.defaults.rightsize\.memory.percent=30' --set 'telemetryIngest.rules.defaults.rightsize\.storage.enabled=true')"
+grep -qF -- '--rules-defaults={' <<<"$rd" || fail "the rule defaults were not passed on: $(grep rules-defaults <<<"$rd")"
+python3 - "$rd" <<'PY'
+import sys, json, re
+m = re.search(r'--rules-defaults=(\{.*\})"', sys.argv[1].replace('\\"', '"'))
+assert m, "no rules-defaults"
+d = json.loads(m.group(1))
+assert d["rightsize.memory"]["percent"] == 30 and d["rightsize.storage"]["enabled"] is True, d
+PY
+echo "ok: right-sizing flags appear only when it is on (and detection is); rule defaults reach the service as one JSON flag, and only when given"
+
+echo "== infrastructure costs: a feature, nothing is passed unless it is on"
+grep -q -- "--costs" <<<"$det" && fail "a --costs flag rendered with costs off: an image without it would not start"
+cs="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set telemetryIngest.costs.azurePrices=false --set telemetryIngest.costs.vcpuGbRatio=6)"
+for want in "- --costs" "--costs-azure-prices=false" "--costs-vcpu-gb-ratio=6"; do
+  grep -qF -- "$want" <<<"$cs" || fail "$want missing with costs on"
+done
+grep -q -- "--costs-prices" <<<"$cs" && fail "prices were passed on that were not given"
+cp="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set 'telemetryIngest.costs.prices.Standard_D4s_v6.hourly=0.25' --set 'telemetryIngest.costs.prices.Standard_D4s_v6.spotHourly=0.07')"
+python3 - "$cp" <<'PY'
+import sys, json, re
+m = re.search(r'--costs-prices=(\{.*\})"', sys.argv[1].replace('\\"', '"'))
+assert m, "no costs-prices"
+d = json.loads(m.group(1))
+assert d["Standard_D4s_v6"] == {"hourly": 0.25, "spotHourly": 0.07}, d
+PY
+grep -q -- "--costs-azure-prices=true" <<<"$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true)" || fail "Azure prices are not on by default"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.costs.enabled=true --set telemetryIngest.costs.vcpuGbRatio=0 2>&1 || true)"
+grep -q "vcpuGbRatio must be above 0" <<<"$out" || fail "a ratio of zero was not refused: $out"
+echo "ok: the costs flags appear only when it is on; prices pass as one JSON flag, and only when given"
+
+echo "== telling Alertmanager of incidents: nothing unless switched on (and detection is), the chart's own Alertmanager is the default"
+grep -q -- "--notify-" <<<"$det" && fail "a --notify- flag rendered with detection on but notifications off: an image without it would not start"
+nf="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set telemetryIngest.notify.alertmanagerUrl=http://am.example:9093 --set telemetryIngest.notify.minSeverity=critical --set telemetryIngest.notify.uiUrl=https://ui.example)"
+for want in '--notify-alertmanager-url=http://am.example:9093' '--notify-min-severity=critical' '--notify-ui-url=https://ui.example'; do
+  grep -qF -- "$want" <<<"$nf" || fail "$want missing with notifications on"
+done
+own="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true)"
+grep -qF -- '--notify-alertmanager-url=http://alertmanager.monitoring.svc.cluster.local:9093' <<<"$own" || fail "the chart's own Alertmanager is not the default: $(grep notify <<<"$own")"
+grep -qF -- '--notify-ui-url' <<<"$own" && fail "a UI address was passed on that was not given"
+render --set telemetryIngest.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true | grep -q -- "--notify-" && fail "notification flags rendered while detection itself is off"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true 2>&1 || true)"
+grep -q "notify needs an Alertmanager" <<<"$out" || fail "notifications with no Alertmanager were not refused: $out"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.detection.enabled=true --set telemetryIngest.notify.enabled=true --set alertmanager.enabled=true --set telemetryIngest.notify.minSeverity=urgent 2>&1 || true)"
+grep -q "must be critical, warning or info" <<<"$out" || fail "a severity that does not exist was not refused: $out"
+echo "ok: notification flags appear only when on (and detection is), pointing at the chart's Alertmanager unless another is named"
+
+echo "== analysis with Claude: nothing unless it is switched on, then a Secret mounted as a file"
+off="$(render --set telemetryIngest.enabled=true)"
+for needle in "--analysis-" "anthropic-key" "/etc/telemetry/anthropic"; do
+  grep -qF -- "$needle" <<<"$off" && fail "'$needle' rendered with analysis off: an image without it would not start"
+done
+an="$(render --set telemetryIngest.enabled=true --set telemetryIngest.analysis.enabled=true --set telemetryIngest.analysis.model=claude-sonnet-5-5)"
+for want in "--analysis-key-file=/etc/telemetry/anthropic/key" "--analysis-model=claude-sonnet-5-5" "secretName: anthropic-api-key" "mountPath: /etc/telemetry/anthropic" "- key: apiKey"; do
+  grep -qF -- "$want" <<<"$an" || fail "$want missing with analysis on"
+done
+grep -qiE "sk-ant|api[_-]?key: *[A-Za-z0-9]" <<<"$an" && fail "a key value rendered into the manifest: it belongs in a Secret the chart does not make"
+out="$(render --set telemetryIngest.enabled=true --set telemetryIngest.analysis.enabled=true --set telemetryIngest.analysis.existingSecret= 2>&1 || true)"
+grep -q "existingSecret is required" <<<"$out" || fail "analysis without a Secret was not refused: $out"
+out="$(render --set telemetryIngest.enabled=true --set 'telemetryIngest.analysis.enabled=true' --set 'telemetryIngest.analysis.model=bad model' 2>&1 || true)"
+grep -q "is not a model id" <<<"$out" || fail "a bad model id was not refused: $out"
+echo "ok: analysis flags and the Secret mount appear only when it is on; a missing Secret or a bad model is refused"
+
+echo "== tiered storage: off by default, and a bucket plus a Secret when on"
+off="$(render --set telemetryIngest.enabled=true)"
+for needle in "storage-policy" "cold-after" "GCS_ACCESS_KEY_ID" "telemetry-clickhouse-storage" "storage.googleapis.com"; do
+  grep -q -- "$needle" <<<"$off" && fail "'$needle' rendered with tiered storage off"
+done
+cold=(--set telemetryIngest.enabled=true --set telemetryIngest.clickhouse.coldStorage.enabled=true)
+for missing in "bucket" "secret"; do
+  case "$missing" in
+    bucket) args=("${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs) ;;
+    secret) args=("${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=b) ;;
+  esac
+  out="$(render "${args[@]}" 2>&1 || true)"
+  grep -q "required when coldStorage.enabled" <<<"$out" || fail "a missing $missing was not refused: $out"
+done
+out="$(render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket='b</endpoint><x>' --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs 2>&1 || true)"
+grep -q "is not a bucket name" <<<"$out" || fail "a bucket name that breaks out of the XML was accepted: $out"
+out="$(render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=b --set telemetryIngest.clickhouse.coldStorage.existingSecret=gcs --set 'telemetryIngest.clickhouse.coldStorage.path=a"b' 2>&1 || true)"
+grep -q "path must not contain" <<<"$out" || fail "a path with a quote was accepted: $out"
+render "${cold[@]}" --set telemetryIngest.clickhouse.coldStorage.bucket=my-bkt --set telemetryIngest.clickhouse.coldStorage.existingSecret=my-gcs --set telemetryIngest.clickhouse.coldStorage.path=/tele/ --set telemetryIngest.clickhouse.coldStorage.coldAfter=72h > "$work/cold.yaml"
+python3 - "$work/cold.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "telemetry-clickhouse-storage")
+xml = cm["data"]["storage.xml"]
+assert "<endpoint>https://storage.googleapis.com/my-bkt/tele/</endpoint>" in xml, xml
+assert 'from_env="GCS_ACCESS_KEY_ID"' in xml and 'from_env="GCS_SECRET_ACCESS_KEY"' in xml
+assert "<support_batch_delete>false</support_batch_delete>" in xml  # GCS has no batch delete
+assert "<default><disk>default</disk></default>" in xml  # the volume an existing table's policy must keep
+sts = next(d for d in docs if d["kind"] == "StatefulSet")
+pod = sts["spec"]["template"]
+c = pod["spec"]["containers"][0]
+env = {e["name"]: e for e in c["env"]}
+for name, key in (("GCS_ACCESS_KEY_ID", "accessKeyId"), ("GCS_SECRET_ACCESS_KEY", "secretAccessKey")):
+    ref = env[name]["valueFrom"]["secretKeyRef"]
+    assert ref == {"name": "my-gcs", "key": key}, ref
+assert "checksum/storage" in pod["metadata"]["annotations"], "ClickHouse would not restart on a configuration change"
+mount = next(m for m in c["volumeMounts"] if m["name"] == "storage-config")
+assert mount["mountPath"] == "/etc/clickhouse-server/config.d/storage.xml" and mount["subPath"] == "storage.xml"
+dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "telemetry-ingest")
+args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
+for a in ("--storage-policy=tiered", "--cold-volume=cold", "--cold-after=72h"):
+    assert a in args, (a, args)
+print("ok: bucket disk, storage policy, keys from the Secret, restart on change, service flags")
+PY
+
 echo "PASS"

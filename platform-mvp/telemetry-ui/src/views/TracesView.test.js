@@ -25,7 +25,7 @@ const searches = (c) => c.get.mock.calls.filter(([p]) => p === 'traces')
 async function mountAt(query = '', props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: stub }, { path: '/traces', name: 'traces', component: TracesView }, { path: '/traces/:id', name: 'trace', component: stub }, { path: '/services/:name', name: 'service', component: stub }],
+    routes: [{ path: '/', component: stub }, { path: '/connection', component: stub }, { path: '/traces', name: 'traces', component: TracesView }, { path: '/traces/:id', name: 'trace', component: stub }, { path: '/applications/:name', name: 'application', component: stub }],
   })
   router.push('/traces' + query)
   await router.isReady()
@@ -43,7 +43,7 @@ describe('TracesView', () => {
     expect(rows[0].text()).toContain('25 ms')
     expect(rows[1].text()).toContain('1.5 s')
     expect(rows[1].get('td.bad').text()).toBe('error')
-    expect(rows[0].findAll('a')[0].attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Ffrontend')
+    expect(rows[0].findAll('a')[0].attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')
     expect(rows[0].findAll('a')[1].attributes('href')).toBe(`/traces/${'1'.repeat(32)}`)
     expect(w.text()).toContain('2 spans')
   })

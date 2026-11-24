@@ -64,7 +64,7 @@ describe('no-instances', () => {
     const recent = look([edge(B, C, { rps: 5 })], { listeners: listening([A, B, C], [B, C]) })
     const r = evaluate({ recent, baseline: NORMAL })
     expect(rules(r)).toEqual([`no-instances|${A}`])
-    expect(r.alerts[0].severity).toBe('critical')
+    expect(r.alerts[0].severity).toBe('warning') // silence is not itself a failure: it may have been scaled down
     expect(r.alerts[0].evidence.lastTrafficPerSec).toBe(10)
   })
 
@@ -145,6 +145,18 @@ describe('incomplete reads', () => {
   it('still judges what is present: errors do not depend on absence', () => {
     const recent = look([edge(B, A, { rps: 10, callErrors: 6 })], { incomplete: true, listeners: listening([A, B]) })
     expect(rules(evaluate({ recent, baseline: NORMAL }))).toEqual([`errors|${A}`])
+  })
+})
+
+describe('applications on a plain host', () => {
+  const NGINX = '/system.slice/nginx.service'
+  it('names an alert after the unit, not its whole cgroup path', () => {
+    const recent = look([edge(B, C, { rps: 5 })], { listeners: listening([NGINX, B, C]) })
+    const baseline = look([edge(B, NGINX, { rps: 10 }), edge(B, C, { rps: 5 })], { listeners: listening([NGINX, B, C]) })
+    const a = evaluate({ recent, baseline }).alerts.find((x) => x.service === NGINX)
+    expect(a).toMatchObject({ rule: 'no-traffic', label: 'nginx' })
+    expect(a.summary).toContain('nginx stopped receiving traffic')
+    expect(a.summary).not.toContain('/system.slice')
   })
 })
 

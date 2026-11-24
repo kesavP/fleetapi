@@ -24,6 +24,10 @@ type Ingest struct {
 	MaxBody  int64
 	Log      *slog.Logger
 	Count    *Counters
+	// Databases stores what database collectors send (POST /v1/db); nil leaves that endpoint out.
+	Databases DatabaseWriter
+	// Inventory stores what cluster collectors send (POST /v1/inventory); nil leaves that endpoint out.
+	Inventory InventoryWriter
 }
 
 type httpError struct {
@@ -42,6 +46,12 @@ func (s *Ingest) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/traces", s.handle("traces", s.traces))
 	mux.HandleFunc("POST /v1/logs", s.handle("logs", s.logs))
 	mux.HandleFunc("POST /v1/profiles", s.handle("profiles", s.profiles))
+	if s.Databases != nil {
+		mux.HandleFunc("POST /v1/db", s.handle("databases", s.databases))
+	}
+	if s.Inventory != nil {
+		mux.HandleFunc("POST /v1/inventory", s.handle("inventory", s.inventory))
+	}
 }
 
 type handler func(project string, w http.ResponseWriter, r *http.Request) error

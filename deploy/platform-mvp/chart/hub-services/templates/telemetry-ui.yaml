@@ -86,6 +86,9 @@ spec:
             # answers 502 and the page does its own checking.
             - name: ALERTS_UPSTREAM
               value: {{ default (printf "http://telemetry-alerts.%s.svc.cluster.local" $.Values.telemetryAlerts.namespace) $ui.alertsUpstream | quote }}
+            # Whether this UI offers the Costs page (a UI switch; the hub's own is telemetryIngest.costs.enabled).
+            - name: UI_COSTS
+              value: {{ ternary "true" "false" (default false $ui.costs.enabled) | quote }}
           ports:
             - name: http
               containerPort: 8080

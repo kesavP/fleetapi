@@ -1,0 +1,70 @@
+{
+  "name": "chainsaw-report",
+  "startTime": "2026-11-11T07:16:48.655990609Z",
+  "endTime": "2026-11-11T07:20:01.964253759Z",
+  "tests": [
+    {
+      "basePath": "tests/01-deployed",
+      "name": "telemetry-ingest-deployed-gke",
+      "status": "failed",
+      "startTime": "2026-11-11T07:16:48.683690132Z",
+      "endTime": "2026-11-11T07:19:50.733634895Z",
+      "steps": [
+        {
+          "name": "ClickHouse is up",
+          "status": "failed",
+          "startTime": "2026-11-11T07:16:50.729313952Z",
+          "endTime": "2026-11-11T07:19:50.733633095Z",
+          "operations": [
+            {
+              "name": "operation 1",
+              "type": "assert",
+              "status": "failed",
+              "startTime": "2026-11-11T07:16:50.730698263Z",
+              "endTime": "2026-11-11T07:19:50.733540094Z",
+              "failure": {
+                "error": "actual resource not found"
+              }
+            }
+          ]
+        },
+        {
+          "name": "@cleanup",
+          "status": "passed",
+          "startTime": "2026-11-11T07:19:50.733713496Z",
+          "endTime": "2026-11-11T07:20:01.960979033Z",
+          "operations": [
+            {
+              "name": "operation 1",
+              "type": "delete",
+              "status": "passed",
+              "startTime": "2026-11-11T07:19:50.733716596Z",
+              "endTime": "2026-11-11T07:20:01.960971633Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "basePath": "tests/03-auth",
+      "name": "telemetry-ingest-auth-gke",
+      "status": "skipped",
+      "startTime": "2026-11-11T07:20:01.961311036Z",
+      "endTime": "2026-11-11T07:20:01.962553646Z"
+    },
+    {
+      "basePath": "tests/04-node-agent",
+      "name": "telemetry-ingest-node-agent-gke",
+      "status": "skipped",
+      "startTime": "2026-11-11T07:20:01.962775947Z",
+      "endTime": "2026-11-11T07:20:01.963295452Z"
+    },
+    {
+      "basePath": "tests/02-ingest-and-query",
+      "name": "telemetry-ingest-and-query-gke",
+      "status": "skipped",
+      "startTime": "2026-11-11T07:20:01.963513153Z",
+      "endTime": "2026-11-11T07:20:01.963882756Z"
+    }
+  ]
+}

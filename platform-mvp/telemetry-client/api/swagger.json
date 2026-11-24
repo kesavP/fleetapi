@@ -1,0 +1,941 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Fleet telemetry read API",
+    "version": "1.0.0",
+    "description": "Reads what the platform's agents sent to the hub's telemetry-ingest: logs, traces and metrics. Every call takes a project's read key in the X-API-Key header; a key reads only its own project."
+  },
+  "basePath": "/api/v1",
+  "schemes": [
+    "https",
+    "http"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "securityDefinitions": {
+    "apiKey": {
+      "type": "apiKey",
+      "in": "header",
+      "name": "X-API-Key"
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "logs"
+    },
+    {
+      "name": "traces"
+    },
+    {
+      "name": "metrics"
+    }
+  ],
+  "paths": {
+    "/projects/{project}/logs": {
+      "get": {
+        "operationId": "searchLogs",
+        "tags": [
+          "logs"
+        ],
+        "summary": "Search logs, newest first.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "type": "string",
+            "description": "Application id, e.g. /k8s/shop/checkout.",
+            "required": false
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "type": "string",
+            "description": "Severity text, e.g. error or warn (case does not matter).",
+            "required": false
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "type": "string",
+            "description": "Text the log body contains (case does not matter).",
+            "required": false
+          },
+          {
+            "name": "trace_id",
+            "in": "query",
+            "type": "string",
+            "description": "Only the logs of this trace (32 hex characters).",
+            "required": false
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "type": "string",
+            "description": "Start of the time range: RFC 3339 or unix seconds. Default: the server's default range before `to`.",
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "type": "string",
+            "description": "End of the time range: RFC 3339 or unix seconds. Default: now.",
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "integer",
+            "description": "How many records.",
+            "required": false,
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching log records.",
+            "schema": {
+              "$ref": "#/definitions/LogsResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/logs/services": {
+      "get": {
+        "operationId": "listLogServices",
+        "tags": [
+          "logs"
+        ],
+        "summary": "The services that sent logs in the time range.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "type": "string",
+            "description": "Start of the time range: RFC 3339 or unix seconds. Default: the server's default range before `to`.",
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "type": "string",
+            "description": "End of the time range: RFC 3339 or unix seconds. Default: now.",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service names.",
+            "schema": {
+              "$ref": "#/definitions/StringsResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/traces": {
+      "get": {
+        "operationId": "searchSpans",
+        "tags": [
+          "traces"
+        ],
+        "summary": "Search spans, newest first.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "type": "string",
+            "description": "Application id.",
+            "required": false
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "type": "string",
+            "description": "Span name.",
+            "required": false
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "type": "string",
+            "description": "Span status.",
+            "required": false,
+            "enum": [
+              "ok",
+              "error",
+              "unset"
+            ]
+          },
+          {
+            "name": "min_duration_ms",
+            "in": "query",
+            "type": "integer",
+            "description": "Only spans at least this long, in milliseconds.",
+            "required": false,
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          {
+            "name": "root",
+            "in": "query",
+            "type": "boolean",
+            "description": "Only root spans (the start of a trace).",
+            "required": false
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "type": "string",
+            "description": "Start of the time range: RFC 3339 or unix seconds. Default: the server's default range before `to`.",
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "type": "string",
+            "description": "End of the time range: RFC 3339 or unix seconds. Default: now.",
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "integer",
+            "description": "How many spans.",
+            "required": false,
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching spans.",
+            "schema": {
+              "$ref": "#/definitions/SpansResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/traces/services": {
+      "get": {
+        "operationId": "listTraceServices",
+        "tags": [
+          "traces"
+        ],
+        "summary": "The services that sent spans in the time range.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "type": "string",
+            "description": "Start of the time range: RFC 3339 or unix seconds. Default: the server's default range before `to`.",
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "type": "string",
+            "description": "End of the time range: RFC 3339 or unix seconds. Default: now.",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service names.",
+            "schema": {
+              "$ref": "#/definitions/StringsResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/traces/{trace_id}": {
+      "get": {
+        "operationId": "getTrace",
+        "tags": [
+          "traces"
+        ],
+        "summary": "All the spans of one trace, oldest first (at most 5000).",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "trace_id",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "pattern": "^[0-9a-fA-F]{32}$",
+            "description": "32 hex characters."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trace's spans.",
+            "schema": {
+              "$ref": "#/definitions/SpansResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/metrics": {
+      "get": {
+        "operationId": "listMetrics",
+        "tags": [
+          "metrics"
+        ],
+        "summary": "The names of the metrics the project has.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metric names.",
+            "schema": {
+              "$ref": "#/definitions/StringsResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/metrics/series": {
+      "get": {
+        "operationId": "listSeries",
+        "tags": [
+          "metrics"
+        ],
+        "summary": "The label sets of a metric.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "type": "string",
+            "description": "The metric.",
+            "required": true
+          },
+          {
+            "name": "match",
+            "in": "query",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi",
+            "required": false,
+            "maxItems": 20,
+            "description": "Label matchers, each label=value; a label may be matched once."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "integer",
+            "description": "How many series.",
+            "required": false,
+            "format": "int64",
+            "minimum": 1,
+            "default": 100
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The series.",
+            "schema": {
+              "$ref": "#/definitions/SeriesResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project}/metrics/query_range": {
+      "get": {
+        "operationId": "queryRange",
+        "tags": [
+          "metrics"
+        ],
+        "summary": "A metric's values over a time range, one series per label set.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "The project the read key belongs to."
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "type": "string",
+            "description": "The metric.",
+            "required": true
+          },
+          {
+            "name": "match",
+            "in": "query",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi",
+            "required": false,
+            "maxItems": 20,
+            "description": "Label matchers, each label=value; a label may be matched once."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "type": "string",
+            "description": "Start of the time range: RFC 3339 or unix seconds. Default: the server's default range before `to`.",
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "type": "string",
+            "description": "End of the time range: RFC 3339 or unix seconds. Default: now.",
+            "required": false
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "type": "integer",
+            "description": "Seconds between points; 0 returns the raw samples.",
+            "required": false,
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 0
+          },
+          {
+            "name": "rate",
+            "in": "query",
+            "type": "boolean",
+            "description": "Per-second rate of a counter; needs a step.",
+            "required": false
+          },
+          {
+            "name": "from_zero",
+            "in": "query",
+            "type": "boolean",
+            "description": "With rate: count a series that starts in the range from zero.",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The series and their points.",
+            "schema": {
+              "$ref": "#/definitions/MetricResponse"
+            }
+          },
+          "400": {
+            "description": "The request is wrong (the message says how).",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "401": {
+            "description": "No API key.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "403": {
+            "description": "The key cannot read this project.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Error": {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "LogRecord": {
+      "type": "object",
+      "properties": {
+        "time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "span_id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "severity_number": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "service": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "resource_attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "log_attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Span": {
+      "type": "object",
+      "properties": {
+        "time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "span_id": {
+          "type": "string"
+        },
+        "parent_span_id": {
+          "type": "string"
+        },
+        "trace_state": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "duration_ns": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "status_code": {
+          "type": "string"
+        },
+        "status_message": {
+          "type": "string"
+        },
+        "resource_attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "span_attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "event_times": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "event_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "event_attributes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "link_trace_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "link_span_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "link_attributes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "SeriesInfo": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Point": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Unix milliseconds."
+        },
+        "v": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "MetricSeries": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Point"
+          }
+        }
+      }
+    },
+    "MetricResult": {
+      "type": "object",
+      "properties": {
+        "series": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MetricSeries"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "LogsResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LogRecord"
+          }
+        }
+      }
+    },
+    "SpansResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Span"
+          }
+        }
+      }
+    },
+    "StringsResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "SeriesResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SeriesInfo"
+          }
+        }
+      }
+    },
+    "MetricResponse": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/MetricResult"
+        }
+      }
+    }
+  }
+}

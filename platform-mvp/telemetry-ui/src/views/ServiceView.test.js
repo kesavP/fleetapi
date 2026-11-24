@@ -29,16 +29,16 @@ async function mountAt(name, props = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', component: stub },
-      { path: '/services', component: stub },
-      { path: '/services/:name', name: 'service', component: ServiceView },
+      { path: '/', component: stub }, { path: '/connection', component: stub },
+      { path: '/applications', component: stub },
+      { path: '/applications/:name', name: 'application', component: ServiceView },
       { path: '/traces', name: 'traces', component: stub },
       { path: '/traces/:id', name: 'trace', component: stub },
       { path: '/logs', name: 'logs', component: stub },
       { path: '/profiles', name: 'profiles', component: stub },
     ],
   })
-  router.push(`/services/${name}`)
+  router.push(`/applications/${name}`)
   await router.isReady()
   const w = mount(ServiceView, { props: { client: clientOf(), session: session(), ...props }, global: { plugins: [router] } })
   await flushPromises()
@@ -152,9 +152,31 @@ describe('ServiceView', () => {
       expect(res).toContain('Running1')
     })
 
+    it('shows the connection and network cards under the resources', async () => {
+      const data = {
+        ...MET,
+        container_net_tcp_successful_connects_total: [{ labels: call, points: flat(2) }, { labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(20) }],
+        container_net_tcp_failed_connects_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(2) }],
+        container_net_tcp_connection_time_seconds_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(0.02) }],
+        container_net_tcp_bytes_sent_total: [{ labels: { container_id: POD, destination: '10.0.0.5:6379' }, points: flat(4096) }],
+      }
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient({}, data) })
+      const cards = w.get('[data-section=plugins]')
+      expect(cards.get('#connections').text()).toContain('Setup time (mean)1 ms')
+      expect(cards.get('#connections').text()).toContain('Failed')
+      expect(cards.get('#network').text()).toContain('Sent4 KiB/s')
+      const order = w.html()
+      expect(order.indexOf('data-section="resources"')).toBeLessThan(order.indexOf('data-section="plugins"'))
+    })
+
+    it('has no plugin cards when the project has no network metrics', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient() })
+      expect(w.find('[data-section=plugins]').exists()).toBe(false)
+    })
+
     it('links a caller to its own page', async () => {
       const { w } = await mountAt(encodeURIComponent(SVC), { client: metricsClient() })
-      expect(w.get('[data-table=in] a').attributes('href')).toBe('/services/%2Fk8s%2Fshop%2Ffrontend')
+      expect(w.get('[data-table=in] a').attributes('href')).toBe('/applications/%2Fk8s%2Fshop%2Ffrontend')
     })
 
     it('does not query metrics for a name that is not a Kubernetes workload, and says why', async () => {
@@ -173,6 +195,71 @@ describe('ServiceView', () => {
     it('says so when the workload has no metrics', async () => {
       const { w } = await mountAt(encodeURIComponent('/k8s/shop/ghost'), { client: metricsClient() })
       expect(w.text()).toContain('No call or resource metrics')
+    })
+  })
+
+  describe('DNS and the places the Map links to', () => {
+    const SVC = '/k8s/shop/cartservice'
+    const POD = '/k8s/shop/cartservice-7c9d8f6b5d-bk7q2/server'
+    const flat = (n) => Array.from({ length: 40 }, (_, i) => ({ t: NOW - (40 - i) * 15000, v: n }))
+    const last = (v) => [{ t: NOW - 1000, v }]
+    const DNSDATA = {
+      container_resources_memory_rss_bytes: [{ labels: { container_id: POD }, points: last(64 * 1024 * 1024) }],
+      container_dns_requests_total: [
+        { labels: { container_id: POD, domain: 'redis.shop.svc', status: 'ok', request_type: 'TypeA' }, points: flat(4) },
+        { labels: { container_id: POD, domain: 'redis.shop.svc', status: 'servfail', request_type: 'TypeA' }, points: flat(1) },
+        { labels: { container_id: POD, domain: 'x.shop.svc.cluster.local', status: 'nxdomain', request_type: 'TypeA' }, points: flat(3) },
+      ],
+    }
+    const dnsClient = (data = DNSDATA) => ({
+      get: vi.fn(async (path, params) => {
+        if (path === 'metrics') return Object.keys(data)
+        if (path === 'metrics/query_range') return { series: data[params.name] || [] }
+        return answers[path]
+      }),
+    })
+
+    it('shows the DNS lookups: how many, how many fail, and for which names', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: dnsClient() })
+      const sec = w.get('#dns')
+      expect(sec.get('[data-testid=dns-summary]').text()).toContain('8.00 lookups a second')
+      expect(sec.get('[data-testid=dns-summary]').text()).toContain('12.5% fail')
+      const rows = sec.findAll('tbody tr').map((r) => r.findAll('td').map((c) => c.text()))
+      expect(rows[0]).toEqual(['redis.shop.svc', '5.00', '1.00', '–']) // the name with failures first
+      expect(rows[1]).toEqual(['x.shop.svc.cluster.local', '3.00', '–', '3.00']) // NXDOMAIN is not a failure
+    })
+
+    it('says so when there are no lookups, and for a name that is not a workload', async () => {
+      const none = await mountAt(encodeURIComponent(SVC), { client: dnsClient({ container_resources_memory_rss_bytes: DNSDATA.container_resources_memory_rss_bytes }) })
+      expect(none.w.get('#dns').text()).toContain('No DNS lookups recorded')
+      const plain = await mountAt('plainname', { client: dnsClient() })
+      expect(plain.w.get('#dns').text()).toContain('kept for Kubernetes workloads')
+    })
+
+    it('has a place for each aspect the Map\'s menu links to', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC), { client: dnsClient() })
+      for (const id of ['instances', 'cpu', 'memory', 'dns', 'logs']) expect(w.find(`#${id}`).exists(), id).toBe(true)
+    })
+
+    it('scrolls to the part named in the address, once the data is there', async () => {
+      const scrolled = []
+      const original = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function () { scrolled.push(this.id) }
+      try {
+        const router = (await mountAt(encodeURIComponent(SVC) + '#memory', { client: dnsClient() })).router
+        await flushPromises()
+        expect(scrolled).toContain('memory')
+        await router.push({ path: router.currentRoute.value.path, hash: '#dns' })
+        await flushPromises()
+        expect(scrolled).toContain('dns')
+      } finally {
+        Element.prototype.scrollIntoView = original
+      }
+    })
+
+    it('does not fail when there is nothing to scroll to', async () => {
+      const { w } = await mountAt(encodeURIComponent(SVC) + '#nonsense', { client: dnsClient() })
+      expect(w.find('#dns').exists()).toBe(true)
     })
   })
 })

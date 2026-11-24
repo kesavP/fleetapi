@@ -22,8 +22,9 @@ kubeconfig-*
 deploy/platform-mvp/chart/*/charts/*.tgz
 deploy/platform-mvp/chart/*/Chart.lock
 
-# AI assistant plan files (not part of the codebase)
-.claude/
+# AI assistant plan files and local settings (not part of the codebase); the skills are, so they are kept
+.claude/*
+!.claude/skills/
 
 # Chainsaw test run artifacts
 tests/e2e/chainsaw-report.json

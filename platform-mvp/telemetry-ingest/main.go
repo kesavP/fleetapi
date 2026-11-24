@@ -11,13 +11,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/analysis"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/config"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/costs"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/detect"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/enroll"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/incident"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/notify"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/pipeline"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/project"
+	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/rules"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/server"
 	"github.com/sojoner/kro-lab/platform-mvp/telemetry-ingest/store"
 )
@@ -100,8 +108,99 @@ func main() {
 	pipe.Store(p)
 
 	mux := http.NewServeMux()
-	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count}).Register(mux)
-	(&server.Query{Projects: reg, Reader: s, Log: log, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 200000}).Register(mux)
+	(&server.Ingest{Projects: reg, Sink: p, MaxBody: cfg.MaxBodyBytes, Log: log, Count: count, Databases: s, Inventory: s}).Register(mux)
+	(&server.Query{Projects: reg, Reader: s, Log: log, DefaultRange: time.Hour, MaxSeries: 500, MaxPoints: 200000, ShareClusterInfo: cfg.ExposeClusterInfo}).Register(mux)
+	// Incident lifecycle: read with a read or manage key, change with a manage key (see server/incidents.go). One replica only: see incident.Manager.
+	// Cluster enrollment: one-time tokens made with a manage key, redeemed by a cluster for an ingest key of its own. The keys it issues are kept
+	// as hashes in ClickHouse and taken up by the registry at once and, so that a revoke or a restart is picked up, every few seconds.
+	enrollments := enroll.NewManager(s.Enrollments())
+	issueKeys := func() {
+		keys, err := enrollments.Keys(ctx)
+		if err != nil {
+			log.Error("reading the issued ingest keys failed; keeping the previous ones", "error", err)
+			return
+		}
+		m := make(map[[32]byte]string, len(keys))
+		for _, k := range keys {
+			m[k.Hash] = k.Project
+		}
+		reg.SetIssuedIngest(m)
+	}
+	enrollments.OnKeys = issueKeys
+	issueKeys()
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				issueKeys()
+			}
+		}
+	}()
+	(&server.Enroll{Projects: reg, Manager: enrollments, Log: log, Count: count}).Register(mux)
+
+	incidents := incident.NewManager(s.Incidents(), log)
+	inc := &server.Incidents{Projects: reg, Manager: incidents, Log: log, Summaries: s}
+	if cfg.AnalysisKey != "" {
+		inc.Analyst = &analysis.Analyst{C: analysis.NewClient(cfg.AnalysisKey, cfg.AnalysisModel), Model: cfg.AnalysisModel}
+		log.Info("analysis of incidents on", "model", cfg.AnalysisModel)
+	}
+	inc.Register(mux)
+	ruleSet := rules.NewManager(s.Rules(), cfg.RulesDefaults)
+	(&server.Rules{Projects: reg, Manager: ruleSet, Log: log}).Register(mux)
+	// The costs are a feature: /features always says whether they are on, and /costs answers only when they are.
+	costAPI := &server.Costs{Projects: reg, Enabled: cfg.Costs, Log: log}
+	if cfg.Costs {
+		prices := &costs.Prices{Overrides: cfg.CostPrices}
+		if cfg.CostsAzurePrices {
+			prices.Azure = &costs.AzureRetail{}
+		}
+		costAPI.Reporter = &costs.Collector{Source: s, Prices: prices, Opts: costs.Options{VCPUGBRatio: cfg.CostsVCPUGBRatio}, Log: log, MaxSeries: 5000}
+		log.Info("infrastructure costs on", "azure_prices", cfg.CostsAzurePrices, "price_overrides", len(cfg.CostPrices))
+	}
+	costAPI.Register(mux)
+	if cfg.DetectInterval > 0 {
+		dc := detect.Defaults()
+		dc.Availability, dc.Latency, dc.LatencySeconds, dc.BurnThreshold = cfg.DetectAvailability, cfg.DetectLatency, cfg.DetectLatencySeconds, cfg.DetectBurn
+		r := &detect.Runner{
+			Projects: reg.Projects, Source: s, Incidents: incidents, Config: dc, Log: log,
+			Interval: cfg.DetectInterval, Lookback: cfg.DetectLookback, MaxAge: cfg.DetectMaxAge, Step: 60, MaxSeries: 5000, MaxPoints: 1000000,
+		}
+		r.SilenceAfter = cfg.DetectSilenceAfter
+		if cfg.DetectSilenceExclude != "" {
+			r.SilenceExclude = regexp.MustCompile(cfg.DetectSilenceExclude) // checked by config.Parse
+		}
+		if cfg.DetectDeps {
+			r.Dependencies = true
+			r.Deps = detect.DepDefaults()
+			r.Deps.Share, r.Deps.MinFailed = cfg.DetectDepsShare, cfg.DetectDepsMinFailed
+			r.Deps.CriticalShare = max(r.Deps.CriticalShare, r.Deps.Share)
+			if cfg.DetectDepsExclude != "" {
+				r.DepsExclude = regexp.MustCompile(cfg.DetectDepsExclude) // checked by config.Parse
+			}
+		}
+		if cfg.NotifyAlertmanagerURL != "" {
+			// an incident the detector opens is told to Alertmanager, in the background and best effort (see the notify package)
+			r.Incidents = notify.Wrap(incidents, &notify.Alertmanager{
+				URL: cfg.NotifyAlertmanagerURL, UIURL: cfg.NotifyUIURL, MinSeverity: incident.Severity(cfg.NotifyMinSeverity), Log: log,
+			})
+			log.Info("telling Alertmanager of incidents", "url", cfg.NotifyAlertmanagerURL, "min_severity", cfg.NotifyMinSeverity)
+		}
+		if cfg.DetectRightsize {
+			r.Rightsize, r.RightsizeEvery, r.Rules = true, cfg.DetectRightsizeEvery, ruleSet
+			if cfg.DetectRightsizeExclude != "" {
+				r.RightsizeExclude = regexp.MustCompile(cfg.DetectRightsizeExclude) // checked by config.Parse
+			}
+		}
+		if err := r.Validate(); err != nil {
+			log.Error("invalid incident detection settings", "error", err)
+			os.Exit(2)
+		}
+		go r.Run(ctx)
+	}
 	app.Store(mux)
 
 	var grpcStop func()
@@ -139,7 +238,8 @@ func openStore(ctx context.Context, cfg config.Config, log *slog.Logger) *store.
 		s, err := store.Open(ctx, store.Options{
 			Addrs: cfg.ClickHouseAddrs, Database: cfg.ClickHouseDatabase, User: cfg.ClickHouseUser,
 			Password: cfg.ClickHousePassword, TLS: cfg.ClickHouseTLS, CreateDatabase: cfg.ClickHouseCreateDatabase,
-			TTL: store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles},
+			TTL:  store.TTLs{Metrics: cfg.TTLMetrics, Traces: cfg.TTLTraces, Logs: cfg.TTLLogs, Profiles: cfg.TTLProfiles, Databases: cfg.TTLDatabases, Inventory: cfg.TTLInventory},
+			Tier: store.Tiering{Policy: cfg.StoragePolicy, Volume: cfg.ColdVolume, After: cfg.ColdAfter},
 		})
 		if err == nil {
 			mctx, cancel := context.WithTimeout(ctx, 2*time.Minute)

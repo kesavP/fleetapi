@@ -29,6 +29,9 @@ type Query struct {
 	DefaultRange time.Duration
 	MaxSeries    int
 	MaxPoints    int
+	// ShareClusterInfo adds the whole-table sizes and the server's disks to /clickhouse. They describe the platform every project shares, so
+	// they are off unless the operator asks for them (--expose-cluster-info).
+	ShareClusterInfo bool
 }
 
 type paramError string
@@ -47,6 +50,16 @@ func (q *Query) Register(mux *http.ServeMux) {
 	mux.HandleFunc(base+"logs", q.wrap(q.searchLogs))
 	mux.HandleFunc(base+"profiles", q.wrap(q.listProfiles))
 	mux.HandleFunc(base+"profiles/top", q.wrap(q.topStacks))
+	mux.HandleFunc(base+"clickhouse", q.wrap(q.clickhouseInfo))
+	mux.HandleFunc(base+"databases", q.wrap(q.listDatabases))
+	mux.HandleFunc(base+"databases/{target}/statements", q.wrap(q.databaseStatements))
+	mux.HandleFunc(base+"databases/{target}/activity", q.wrap(q.databaseActivity))
+	mux.HandleFunc(base+"databases/{target}/slow", q.wrap(q.databaseSlow))
+	mux.HandleFunc(base+"databases/{target}/pools", q.wrap(q.databasePools))
+	mux.HandleFunc(base+"inventory", q.wrap(q.inventorySummary))
+	mux.HandleFunc(base+"inventory/events", q.wrap(q.inventoryEvents))
+	mux.HandleFunc(base+"inventory/{kind}", q.wrap(q.inventoryList))
+	mux.HandleFunc(base+"inventory/{kind}/{uid}/history", q.wrap(q.inventoryHistory))
 }
 
 type queryFunc func(ctx context.Context, project string, w http.ResponseWriter, r *http.Request) (any, error)
@@ -137,15 +150,34 @@ func required(r *http.Request, name string) (string, error) {
 	return v, nil
 }
 
-// matchers reads match.<label>=<value> pairs.
+// matchers reads label matchers, as match.<label>=<value> or as a repeated match=<label>=<value> (the form an API description can state, used
+// by the generated client). A label may be given once, in either form.
 func matchers(r *http.Request) (map[string]string, error) {
 	m := map[string]string{}
+	set := func(label, value string) error {
+		if _, dup := m[label]; dup {
+			return paramError("the label " + label + " may be matched once")
+		}
+		m[label] = value
+		return nil
+	}
 	for k, vs := range r.URL.Query() {
 		if label, ok := strings.CutPrefix(k, "match."); ok && label != "" {
 			if len(vs) != 1 {
 				return nil, paramError(k + " may be given once")
 			}
-			m[label] = vs[0]
+			if err := set(label, vs[0]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, kv := range r.URL.Query()["match"] {
+		label, value, ok := strings.Cut(kv, "=")
+		if !ok || label == "" {
+			return nil, paramError(fmt.Sprintf("match must be label=value, not %q", kv))
+		}
+		if err := set(label, value); err != nil {
+			return nil, err
 		}
 	}
 	if len(m) > maxMatchers {
@@ -269,6 +301,12 @@ func (q *Query) searchLogs(ctx context.Context, project string, _ http.ResponseW
 		Contains: v.Get("q"), TraceID: strings.ToLower(v.Get("trace_id")),
 		From: from, To: to, Limit: limit,
 	})
+}
+
+// clickhouseInfo: how the service is connected to ClickHouse and how much this project stores there. The address and credentials are not in
+// the answer (see store.ClickHouseInfo).
+func (q *Query) clickhouseInfo(ctx context.Context, project string, _ http.ResponseWriter, _ *http.Request) (any, error) {
+	return q.Reader.ClickHouseInfo(ctx, project, q.ShareClusterInfo)
 }
 
 func (q *Query) listProfiles(ctx context.Context, project string, _ http.ResponseWriter, _ *http.Request) (any, error) {

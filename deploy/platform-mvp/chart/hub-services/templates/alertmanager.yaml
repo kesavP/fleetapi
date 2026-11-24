@@ -1,0 +1,157 @@
+{{- define "hub.alertmanager.config" -}}
+{{- $am := .Values.alertmanager -}}
+global:
+  resolve_timeout: 5m
+route:
+  receiver: slack
+  group_by: {{ $am.route.groupBy | toJson }}
+  group_wait: {{ $am.route.groupWait }}
+  group_interval: {{ $am.route.groupInterval }}
+  repeat_interval: {{ $am.route.repeatInterval }}
+  routes:
+    # An incident the hub's detector opened is told once, each as a message of its own. Nothing resolves it here, so it is sent with an end time
+    # an hour ahead and not repeated, and no "resolved" follows.
+    - matchers:
+        - source="incident"
+      receiver: slack-incidents
+      group_by: [alertname, project, incident]
+      group_wait: 10s
+      repeat_interval: 24h
+receivers:
+  - name: slack
+    slack_configs:
+      - api_url_file: /etc/alertmanager/slack/webhook
+        send_resolved: {{ $am.slack.sendResolved }}
+        {{- with $am.slack.channel }}
+        channel: {{ . | quote }}
+        {{- end }}
+        title: '{{ `[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}{{ if .CommonLabels.project }} ({{ .CommonLabels.project }}){{ end }}` }}'
+        text: |-
+          {{ `{{ range .Alerts -}}
+          {{ if .Labels.severity }}*{{ .Labels.severity }}* {{ end }}{{ .Annotations.summary }}
+          {{ end }}` }}
+  - name: slack-incidents
+    slack_configs:
+      - api_url_file: /etc/alertmanager/slack/webhook
+        send_resolved: false
+        {{- with $am.slack.channel }}
+        channel: {{ . | quote }}
+        {{- end }}
+        title: '{{ `Incident: {{ .CommonAnnotations.summary }}` }}'
+        text: |-
+          {{ `{{ range .Alerts -}}
+          *{{ .Labels.severity }}* in {{ .Labels.project }}{{ if .Labels.app }}, {{ .Labels.app }}{{ end }}
+          {{ .Annotations.description }}
+          {{ if .GeneratorURL }}<{{ .GeneratorURL }}|Open the incident>{{ end }}
+          {{ end }}` }}
+{{- end -}}
+{{- if .Values.alertmanager.enabled }}
+{{- $am := .Values.alertmanager }}
+{{- $ns := $am.namespace }}
+{{- if not $am.slack.existingSecret }}{{ fail "alertmanager.slack.existingSecret is required when alertmanager.enabled (a Secret holding the Slack incoming-webhook URL)" }}{{ end }}
+{{- if not $am.slack.secretKey }}{{ fail "alertmanager.slack.secretKey is required when alertmanager.enabled" }}{{ end }}
+# Alertmanager, with a Slack receiver. See docs/platform-mvp/26-notifications.md.
+#
+# The Slack webhook URL is a secret and is not rendered anywhere: it is read from the Secret named by slack.existingSecret, mounted as a file that
+# the receivers name (api_url_file). One replica, no gossip: it is not a cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: {{ $ns }}
+  labels:
+    app: alertmanager
+data:
+  alertmanager.yml: |
+    {{- include "hub.alertmanager.config" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: {{ $ns }}
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  selector:
+    app: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: {{ $ns }}
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+      annotations:
+        # A change of the config replaces the pod: Alertmanager reads it at start (and on a reload nothing here sends).
+        checksum/config: {{ include "hub.alertmanager.config" . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: alertmanager
+          image: "{{ $am.image.repository }}:{{ $am.image.tag }}"
+          imagePullPolicy: {{ $am.image.pullPolicy }}
+          args:
+            - --config.file=/etc/alertmanager/config/alertmanager.yml
+            - --storage.path=/alertmanager
+            - --web.listen-address=:9093
+            - --cluster.listen-address=
+          ports:
+            - name: http
+              containerPort: 9093
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: {{ $am.runAsUser }}
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager/config
+              readOnly: true
+            - name: slack
+              mountPath: /etc/alertmanager/slack
+              readOnly: true
+            - name: data
+              mountPath: /alertmanager
+          resources:
+            {{- toYaml $am.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        - name: slack
+          secret:
+            secretName: {{ $am.slack.existingSecret }}
+            items:
+              - key: {{ $am.slack.secretKey }}
+                path: webhook
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+{{- end }}

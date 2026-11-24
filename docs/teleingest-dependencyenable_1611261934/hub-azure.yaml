@@ -1,0 +1,27 @@
+hub-azure.yaml:
+telemetryIngest:
+  enabled: true
+  namespace: monitoring
+  image:
+    repository: grandnodeacr4215.azurecr.io/telemetry-ingest
+    tag: v4
+  serviceMonitor:
+    enabled: false          # no Prometheus Operator CRDs on a plain AKS cluster
+  detection:
+    enabled: true           # optional 
+  clickhouse:
+    storage: 50Gi
+    coldStorage:
+      enabled: false
+telemetryUi:
+  enabled: true
+  image:
+    repository: grandnodeacr4215.azurecr.io/telemetry-ui
+    tag: v3
+    
+vmBindingController: {enabled: false}
+alertRouter: {enabled: false}
+metricsIngest: {enabled: false}
+spokeProbes: {enabled: false}
+dependencies: { enabled: true }
+

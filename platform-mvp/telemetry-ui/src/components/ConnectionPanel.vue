@@ -53,7 +53,7 @@ function disconnect() {
 
 <template>
   <section class="panel" aria-labelledby="conn-title">
-    <h2 id="conn-title">Connection</h2>
+    <h2 id="conn-title">Connect to a project</h2>
 
     <div v-if="connected" class="connected" role="status">
       <p>

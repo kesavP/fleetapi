@@ -3,6 +3,23 @@
 {{- $ti := .Values.telemetryIngest }}
 {{- $keys := lookup "v1" "Secret" $ns "telemetry-ingest-keys" }}
 {{- $svc := $ti.service }}
+{{- $cold := $ti.clickhouse.coldStorage }}
+{{- $an := $ti.analysis }}
+{{- $nt := $ti.notify }}
+{{- $ntUrl := $nt.alertmanagerUrl }}
+{{- if and (not $ntUrl) .Values.alertmanager.enabled }}{{ $ntUrl = printf "http://alertmanager.%s.svc.cluster.local:9093" .Values.alertmanager.namespace }}{{ end }}
+{{- if and $nt.enabled (not $ntUrl) }}{{ fail "telemetryIngest.notify needs an Alertmanager: set telemetryIngest.notify.alertmanagerUrl, or switch on alertmanager.enabled" }}{{ end }}
+{{- if and $nt.enabled (not (has $nt.minSeverity (list "critical" "warning" "info"))) }}{{ fail (printf "telemetryIngest.notify.minSeverity %q must be critical, warning or info" $nt.minSeverity) }}{{ end }}
+{{- if $an.enabled }}
+{{- if not $an.existingSecret }}{{ fail "telemetryIngest.analysis.existingSecret is required when analysis.enabled (a Secret holding the Anthropic API key)" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9.-]*$" $an.model) }}{{ fail (printf "telemetryIngest.analysis.model %q is not a model id" $an.model) }}{{ end }}
+{{- end }}
+{{- if $cold.enabled }}
+{{- if not $cold.bucket }}{{ fail "telemetryIngest.clickhouse.coldStorage.bucket is required when coldStorage.enabled" }}{{ end }}
+{{- if not $cold.existingSecret }}{{ fail "telemetryIngest.clickhouse.coldStorage.existingSecret is required when coldStorage.enabled (a Secret with accessKeyId and secretAccessKey)" }}{{ end }}
+{{- if regexMatch "[^a-z0-9._-]" $cold.bucket }}{{ fail (printf "telemetryIngest.clickhouse.coldStorage.bucket %q is not a bucket name" $cold.bucket) }}{{ end }}
+{{- if regexMatch "[<>&\"'\\s]" $cold.path }}{{ fail "telemetryIngest.clickhouse.coldStorage.path must not contain quotes, angle brackets, & or spaces" }}{{ end }}
+{{- end }}
 {{- if not (has $svc.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
 {{- fail (printf "telemetryIngest.service.type %q must be ClusterIP, NodePort or LoadBalancer" $svc.type) }}
 {{- end }}
@@ -20,8 +37,10 @@
 # spokes, keeps it in ClickHouse and serves it per project (one project per
 # fleet cluster). See docs/platform-mvp/20-telemetry-ingest.md.
 #
-# Keys. Each fleet cluster gets an ingest key (its agents send with it) and a
-# read key (the query API). They are generated once and kept on upgrades
+# Keys. Each fleet cluster gets an ingest key (its agents send with it), a
+# read key (the query API) and a manage key (changing incidents: the read key
+# can look, never touch, so a browser can hold it; the manage key stays on the
+# hub and is never copied to a spoke). They are generated once and kept on upgrades
 # (`lookup` finds the existing Secret); under `helm template` there is no
 # cluster, so throwaway values are rendered. projects.json is derived from the
 # same keys, so the two can never disagree.
@@ -38,13 +57,16 @@ stringData:
   {{- range .Values.fleet.clusters }}
   {{- $ingest := randAlphaNum 32 }}
   {{- $read := randAlphaNum 32 }}
+  {{- $manage := randAlphaNum 32 }}
   {{- if and $keys $keys.data }}
   {{- $ingest = index $keys.data (printf "%s.ingest" .name) | default (b64enc $ingest) | b64dec }}
   {{- $read = index $keys.data (printf "%s.read" .name) | default (b64enc $read) | b64dec }}
+  {{- $manage = index $keys.data (printf "%s.manage" .name) | default (b64enc $manage) | b64dec }}
   {{- end }}
   {{ .name }}.ingest: {{ $ingest | quote }}
   {{ .name }}.read: {{ $read | quote }}
-  {{- $projects = append $projects (dict "name" .name "ingestKeys" (list $ingest) "readKeys" (list $read)) }}
+  {{ .name }}.manage: {{ $manage | quote }}
+  {{- $projects = append $projects (dict "name" .name "ingestKeys" (list $ingest) "readKeys" (list $read) "manageKeys" (list $manage)) }}
   {{- end }}
   projects.json: {{ dict "projects" $projects | toJson | quote }}
 ---
@@ -81,6 +103,50 @@ spec:
       port: 8123
       targetPort: http
 ---
+{{- if $cold.enabled }}
+# The bucket as a ClickHouse disk, and the storage policy the service puts the big tables on. The keys are not in this file: ClickHouse
+# reads them from the environment (from_env), which the StatefulSet fills from the Secret. The "default" volume keeps its name because
+# a table's storage policy can only be changed to one that still has the volumes and disks the table was created with.
+# GCS does not support S3 batch deletes, hence support_batch_delete=false.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telemetry-clickhouse-storage
+  namespace: {{ $ns }}
+  labels:
+    app: telemetry-clickhouse
+data:
+  storage.xml: |
+    <clickhouse>
+      <storage_configuration>
+        <disks>
+          <gcs>
+            <type>s3</type>
+            <endpoint>{{ trimSuffix "/" $cold.endpoint }}/{{ $cold.bucket }}/{{ trimAll "/" $cold.path }}/</endpoint>
+            <access_key_id from_env="GCS_ACCESS_KEY_ID"/>
+            <secret_access_key from_env="GCS_SECRET_ACCESS_KEY"/>
+            <metadata_path>/var/lib/clickhouse/disks/gcs/</metadata_path>
+            <support_batch_delete>false</support_batch_delete>
+          </gcs>
+          <gcs_cache>
+            <type>cache</type>
+            <disk>gcs</disk>
+            <path>/var/lib/clickhouse/disks/gcs_cache/</path>
+            <max_size>{{ int64 $cold.cacheBytes }}</max_size>
+          </gcs_cache>
+        </disks>
+        <policies>
+          <tiered>
+            <volumes>
+              <default><disk>default</disk></default>
+              <cold><disk>gcs_cache</disk></cold>
+            </volumes>
+          </tiered>
+        </policies>
+      </storage_configuration>
+    </clickhouse>
+---
+{{- end }}
 # One ClickHouse replica: enough for a lab, and the tables are not replicated.
 apiVersion: apps/v1
 kind: StatefulSet
@@ -99,7 +165,18 @@ spec:
     metadata:
       labels:
         app: telemetry-clickhouse
+      {{- if $cold.enabled }}
+      annotations:
+        # A change to the storage configuration restarts ClickHouse, which reads it only at start.
+        checksum/storage: {{ toYaml $cold | sha256sum }}
+      {{- end }}
     spec:
+      {{- if $cold.enabled }}
+      volumes:
+        - name: storage-config
+          configMap:
+            name: telemetry-clickhouse-storage
+      {{- end }}
       containers:
         - name: clickhouse
           image: "{{ $ti.clickhouse.image.repository }}:{{ $ti.clickhouse.image.tag }}"
@@ -114,6 +191,18 @@ spec:
                   key: password
             - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
               value: "1"
+            {{- if $cold.enabled }}
+            - name: GCS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cold.existingSecret }}
+                  key: accessKeyId
+            - name: GCS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cold.existingSecret }}
+                  key: secretAccessKey
+            {{- end }}
           ports:
             - name: native
               containerPort: 9000
@@ -133,6 +222,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/clickhouse
+            {{- if $cold.enabled }}
+            - name: storage-config
+              mountPath: /etc/clickhouse-server/config.d/storage.xml
+              subPath: storage.xml
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml $ti.clickhouse.resources | nindent 12 }}
   volumeClaimTemplates:
@@ -225,6 +320,14 @@ spec:
         - name: clickhouse-password
           secret:
             secretName: telemetry-clickhouse
+{{- if $an.enabled }}
+        - name: anthropic-key
+          secret:
+            secretName: {{ $an.existingSecret }}
+            items:
+              - key: {{ $an.secretKey }}
+                path: key
+{{- end }}
       containers:
         - name: telemetry-ingest
           image: "{{ $ti.image.repository }}:{{ $ti.image.tag }}"
@@ -240,6 +343,64 @@ spec:
             - --ttl-traces={{ $ti.retention.traces }}
             - --ttl-logs={{ $ti.retention.logs }}
             - --ttl-profiles={{ $ti.retention.profiles }}
+{{- if $cold.enabled }}
+            - --storage-policy=tiered
+            - --cold-volume=cold
+            - --cold-after={{ $cold.coldAfter }}
+{{- end }}
+{{- if $ti.exposeClusterInfo }}
+            - --expose-cluster-info
+{{- end }}
+{{- if and $nt.enabled $ti.detection.enabled }}
+            - {{ printf "--notify-alertmanager-url=%s" $ntUrl | quote }}
+            - --notify-min-severity={{ $nt.minSeverity }}
+            {{- with $nt.uiUrl }}
+            - {{ printf "--notify-ui-url=%s" . | quote }}
+            {{- end }}
+{{- end }}
+{{- if $ti.costs.enabled }}
+            {{- if not (and (gt (float64 $ti.costs.vcpuGbRatio) 0.0) (le (float64 $ti.costs.vcpuGbRatio) 100.0)) }}{{ fail "telemetryIngest.costs.vcpuGbRatio must be above 0 and at most 100" }}{{ end }}
+            - --costs
+            - --costs-azure-prices={{ $ti.costs.azurePrices }}
+            - --costs-vcpu-gb-ratio={{ $ti.costs.vcpuGbRatio }}
+            {{- if $ti.costs.prices }}
+            {{- /* prices are numbers whatever way they were set (--set gives a decimal as text) */ -}}
+            {{- $prices := dict }}
+            {{- range $type, $p := $ti.costs.prices }}
+            {{- $_ := set $prices $type (dict "hourly" (float64 $p.hourly) "spotHourly" (float64 (default 0 $p.spotHourly))) }}
+            {{- end }}
+            - {{ printf "--costs-prices=%s" ($prices | toJson) | quote }}
+            {{- end }}
+{{- end }}
+{{- if $ti.rules.defaults }}
+            - {{ printf "--rules-defaults=%s" ($ti.rules.defaults | toJson) | quote }}
+{{- end }}
+{{- if $an.enabled }}
+            - --analysis-key-file=/etc/telemetry/anthropic/key
+            - --analysis-model={{ $an.model }}
+{{- end }}
+{{- if $ti.detection.enabled }}
+            - --detect-interval={{ $ti.detection.interval }}
+            - --detect-lookback={{ $ti.detection.lookback }}
+            - --detect-max-age={{ $ti.detection.maxAge }}
+            - --detect-availability={{ $ti.detection.availability }}
+            - --detect-latency={{ $ti.detection.latency }}
+            - --detect-latency-seconds={{ $ti.detection.latencySeconds }}
+            - --detect-burn={{ $ti.detection.burn }}
+            - --detect-silence-after={{ $ti.detection.silence.after }}
+            - {{ printf "--detect-silence-exclude=%s" $ti.detection.silence.exclude | quote }}
+{{- if $ti.detection.rightsizing.enabled }}
+            - --detect-rightsize
+            - --detect-rightsize-every={{ $ti.detection.rightsizing.every }}
+            - {{ printf "--detect-rightsize-exclude=%s" $ti.detection.rightsizing.exclude | quote }}
+{{- end }}
+{{- if $ti.detection.dependencies.enabled }}
+            - --detect-deps
+            - --detect-deps-share={{ $ti.detection.dependencies.share }}
+            - --detect-deps-min-failed={{ $ti.detection.dependencies.minFailed }}
+            - {{ printf "--detect-deps-exclude=%s" $ti.detection.dependencies.exclude | quote }}
+{{- end }}
+{{- end }}
           ports:
             - name: http
               containerPort: 8080
@@ -267,6 +428,11 @@ spec:
             - name: clickhouse-password
               mountPath: /etc/telemetry/clickhouse
               readOnly: true
+{{- if $an.enabled }}
+            - name: anthropic-key
+              mountPath: /etc/telemetry/anthropic
+              readOnly: true
+{{- end }}
           resources:
             {{- toYaml $ti.resources | nindent 12 }}
 {{- if $ti.serviceMonitor.enabled }}

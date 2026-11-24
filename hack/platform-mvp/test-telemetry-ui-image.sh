@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the built telemetry-ui image (as the chart runs it: uid 101, read-only root, writable tmpfs for the
 # directories nginx writes) in front of a stub API, and checks: the app and SPA routes are served; /api GETs are
-# proxied with the X-API-Key header intact and the path unchanged; non-GET is refused; the agents' ingest paths
+# proxied with the X-API-Key header intact and the path unchanged; non-GET is refused, but for making and revoking an enrollment; the agents' ingest paths
 # and other /api paths are not reachable; the alerts path (and only it) goes to the alert service, with look-alike paths staying
 # with the read API and a 502 when that service is absent; security headers and no-store are set; and the container starts
 # although the API does not exist yet (the name is resolved per request).
@@ -18,15 +18,21 @@ trap cleanup EXIT
 if [ -z "$image" ]; then
   image="telemetry-ui:test-$$"
   echo "== building $image"
-  docker build -q -t "$image" "$root/platform-mvp/telemetry-ui" >/dev/null
+  # built as the Makefile builds it, with a version the checks below look for
+  docker build -q -t "$image" --build-arg APP_VERSION=v-imgtest --build-arg APP_COMMIT=abcdef123456-dirty --build-arg APP_BUILT=2026-11-10T07:30:00Z "$root/platform-mvp/telemetry-ui" >/dev/null
 fi
 
 work="$(mktemp -d)"; trap 'cleanup; rm -rf "$work"' EXIT
 cat > "$work/stub.py" <<'PY'
 import http.server, json, os
 class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(s): s.do_GET()
+    def do_DELETE(s): s.do_GET()
+    def do_PUT(s): s.do_GET()
     def do_GET(s):
-        b = json.dumps({"who": os.environ.get("WHO"), "path": s.path, "key": s.headers.get("X-API-Key")}).encode()
+        n = int(s.headers.get("Content-Length") or 0)
+        s.rfile.read(n)
+        b = json.dumps({"who": os.environ.get("WHO"), "method": s.command, "path": s.path, "key": s.headers.get("X-API-Key")}).encode()
         s.send_response(200); s.send_header("Content-Type", "application/json"); s.end_headers(); s.wfile.write(b)
     def log_message(*a): pass
 http.server.HTTPServer(("", 80), H).serve_forever()
@@ -41,6 +47,29 @@ echo "indexhdr=$(curl -sI $U/ | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(content
 echo "alerts=$(curl -s -H 'X-API-Key: k2' "$U/api/v1/projects/gke/alerts")"
 echo "lookalikes=$(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/gke/alerts/extra" | sed 's/.*"who": "\([a-z]*\)".*/\1/') $(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/gke/alertsx" | sed 's/.*"who": "\([a-z]*\)".*/\1/') $(curl -s -H 'X-API-Key: k' "$U/api/v1/projects/alerts/metrics" | sed 's/.*"who": "\([a-z]*\)".*/\1/')"
 echo "alertspost=$(code -X POST $U/api/v1/projects/gke/alerts)"
+# Enrolling a cluster is the one write the UI passes on: POST to make one, DELETE to revoke one, on that path and no other
+E=$U/api/v1/projects/gke/enrollments
+echo "enroll=$(curl -s -X POST -H 'X-API-Key: m1' -H 'Content-Type: application/json' -d '{"cluster":"gke"}' $E | sed 's/.*"method": "\([A-Z]*\)".*"key": "\([a-z0-9]*\)".*/\1 \2/')"
+echo "enrolldelete=$(code -X DELETE $E/0123456789ab) enrollget=$(code $E)"
+echo "enrollblocked=$(code -X PUT $E) $(code -X PATCH $E) $(code -X DELETE $E/notanid) $(code -X POST $E/0123456789ab/x) $(code -X POST $U/api/v1/projects/gke/incidents) $(code -X POST $U/api/v1/projects/gke/enrollmentsx) $(code -X POST $U/api/v1/projects/gke/enrollments/../incidents) $(code -X DELETE $U/api/v1/projects/gke/incidents/abcdefgh)"
+# Asking for an analysis of an incident is the other write it passes on: POST, on exactly .../incidents/<8 letters or digits>/analysis
+A=$U/api/v1/projects/gke/incidents/abcdefgh/analysis
+echo "analysis=$(curl -s -X POST -H 'X-API-Key: m1' $A | sed 's/.*"method": "\([A-Z]*\)".*"path": "\([^"]*\)".*"key": "\([a-z0-9]*\)".*/\1 \2 \3/')"
+echo "analysisblocked=$(code -X PUT $A) $(code -X DELETE $A) $(code -X PATCH $A) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefg/analysis) $(code -X POST $U/api/v1/projects/gke/incidents/ABCDEFGH/analysis) $(code -X POST ${A}x) $(code -X POST $A/more) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/transitions) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/comments) $(code -X POST $U/api/v1/projects/gke/incidents/abcdefgh/analysis/../transitions)"
+echo "analysisread=$(code $A)"
+# Saving a rule is the third write it passes on: PUT, on exactly .../rules/rightsize.memory, .cpu or .storage
+R=$U/api/v1/projects/gke/rules
+echo "rule=$(curl -s -X PUT -H 'X-API-Key: m1' -H 'Content-Type: application/json' -d '{"enabled":true,"percent":40,"days":7,"percentile":95}' $R/rightsize.cpu | sed 's/.*"method": "\([A-Z]*\)".*"path": "\([^"]*\)".*"key": "\([a-z0-9]*\)".*/\1 \2 \3/')"
+echo "ruleblocked=$(code -X POST $R/rightsize.memory) $(code -X DELETE $R/rightsize.memory) $(code -X PATCH $R/rightsize.memory) $(code -X PUT $R/rightsize.network) $(code -X PUT $R/rightsize.memoryx) $(code -X PUT $R/rightsize.MEMORY) $(code -X PUT $R/rightsize.memory/x) $(code -X PUT $R) $(code -X PUT $R/) $(code -X PUT $U/api/v1/projects/gke/rules/rightsize.memory/../../incidents)"
+echo "ruleread=$(code $R) $(code $R/rightsize.memory)"
+echo "enrolltoobig=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-API-Key: m1' -H 'Content-Type: application/json' -d "$(head -c 3000 /dev/zero | tr '\0' 'a')" $E)"
+echo "enrollingest=$(code -X POST $U/v1/enroll)"
+echo "version=$(curl -s $U/version.json | tr -d ' \n')"
+echo "versionhdr=$(curl -sI $U/version.json | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(content-type|cache-control):' | cut -d: -f1 | sort | tr '\n' ,)"
+echo "uifeatures=$(curl -s $U/ui-features.json | tr -d ' \n')"
+echo "uifeatureshdr=$(curl -sI $U/ui-features.json | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(content-type|cache-control):' | cut -d: -f1 | sort | tr '\n' ,)"
+js="$(curl -s $U/ | grep -o '/assets/index-[^"]*\.js' | head -1)"
+echo "bundle=$(curl -s $U$js | grep -c 'v-imgtest')"
 echo "apihdr=$(curl -sI -H 'X-API-Key: k' $U/api/v1/projects/gke/metrics | tr -d '\r' | tr 'A-Z' 'a-z' | grep -E '^(cache-control|x-content-type-options):' | cut -d: -f1 | sort | tr '\n' ,)"
 SH
 
@@ -63,14 +92,32 @@ sleep 3
 out="$(docker run --rm --network "$net" -v "$work/probe.sh":/p.sh:ro --entrypoint sh curlimages/curl /p.sh)"
 echo "$out" | sed 's/^/   /'
 has() { grep -qF -- "$1" <<<"$out" || fail "expected: $1"; }
-has 'proxy={"who": "ingest", "path": "/api/v1/projects/gke/metrics?x=1", "key": "k1"}'
+has 'proxy={"who": "ingest", "method": "GET", "path": "/api/v1/projects/gke/metrics?x=1", "key": "k1"}'
 has 'health=200 index=200 spa=200 ingest=404'
 has 'otherapi=404 post=405 asset=404'
 has 'indexhdr=cache-control,content-security-policy,x-frame-options,'
 has 'apihdr=cache-control,x-content-type-options,'
-has 'alerts={"who": "alerts", "path": "/api/v1/projects/gke/alerts", "key": "k2"}'
+has 'alerts={"who": "alerts", "method": "GET", "path": "/api/v1/projects/gke/alerts", "key": "k2"}'
 has 'lookalikes=ingest ingest ingest'
 has 'alertspost=405'
+has 'enroll=POST m1'
+has 'enrolldelete=200 enrollget=200'
+has 'enrollblocked=405 405 405 405 405 405 405 405'
+has 'analysis=POST /api/v1/projects/gke/incidents/abcdefgh/analysis m1'
+has 'analysisblocked=405 405 405 405 405 405 405 405 405 405'
+has 'analysisread=200'
+has 'rule=PUT /api/v1/projects/gke/rules/rightsize.cpu m1'
+has 'ruleblocked=405 405 405 405 405 405 405 405 405 405'
+has 'ruleread=200 200'
+has 'enrolltoobig=413'
+has 'enrollingest=404'
+# the build says which build it is, in a file that can be fetched without a browser, and in the page itself
+has 'version={"name":"telemetry-ui","version":"v-imgtest","commit":"abcdef123456-dirty","built":"2026-11-10T07:30:00Z"}'
+has 'versionhdr=cache-control,content-type,'
+has 'bundle=1'
+# the Costs page is off unless the deployment says so (UI_COSTS), and the file says nothing else
+has 'uifeatures={"costs":false}'
+has 'uifeatureshdr=cache-control,content-type,'
 
 echo "== the alerts path answers 502 when the alert service is not there (the page then checks for itself)"
 docker rm -f "$net-alerts" >/dev/null
@@ -78,4 +125,10 @@ code="$(docker run --rm --network "$net" --entrypoint sh curlimages/curl -c 'cur
 [ "$code" = 502 ] || fail "expected 502 without the alert service, got $code"
 code="$(docker run --rm --network "$net" --entrypoint sh curlimages/curl -c 'curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: k" http://ui:8080/api/v1/projects/gke/metrics')"
 [ "$code" = 200 ] || fail "the rest of the API must still work, got $code"
+echo "== UI_COSTS=true offers the Costs page"
+docker rm -f "$net-ui" >/dev/null
+run_ui -e API_UPSTREAM=http://telemetry-ingest -e UI_COSTS=true
+sleep 3
+on="$(docker run --rm --network "$net" --entrypoint sh curlimages/curl -c 'curl -s http://ui:8080/ui-features.json')"
+[ "$on" = '{"costs":true}' ] || fail "UI_COSTS=true should offer the page, got $on"
 echo "OK: telemetry-ui image"

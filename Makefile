@@ -10,6 +10,7 @@
 SHELL := /usr/bin/env bash
 
 export PATH := $(shell go env GOPATH)/bin:$(PATH)
+export PATH := $(shell go env GOPATH)/bin:$(PATH)
 
 # ── Externalized config ──────────────────────────────────────────────────────
 KIND_HUB          ?= hub
@@ -68,8 +69,8 @@ CHAINSAW_REPORT    ?= chainsaw-report.json
 CHAINSAW_RUNNER_DIR ?= deploy/platform-mvp/observability
 CRONJOB_SCHEDULE   ?= "*/2 * * * *"
 
-DOCKER_REGISTRY    ?= sojoner
-IMAGE_TAG          ?= dev
+DOCKER_REGISTRY    ?= grandnodeacr4215.azurecr.io
+IMAGE_TAG          ?= v4
 BC_DIR             ?= platform-mvp/binding-controller
 WO_DIR             ?= platform-mvp/widget-operator
 OV_DIR             ?= platform-mvp/oidc-verifier
@@ -78,6 +79,8 @@ VMBC_DIR           ?= platform-mvp/vm-binding-controller
 VMSG_DIR           ?= platform-mvp/vmset-gateway
 AR_DIR             ?= platform-mvp/alert-router
 TI_DIR             ?= platform-mvp/telemetry-ingest
+DBC_DIR            ?= platform-mvp/db-collector
+CC_DIR             ?= platform-mvp/cluster-collector
 UI_DIR             ?= platform-mvp/telemetry-ui
 
 BC_IMAGE           ?= $(DOCKER_REGISTRY)/binding-controller:$(IMAGE_TAG)
@@ -88,6 +91,11 @@ VMBC_IMAGE         ?= $(DOCKER_REGISTRY)/vm-binding-controller:$(IMAGE_TAG)
 VMSG_IMAGE         ?= $(DOCKER_REGISTRY)/vmset-gateway:$(IMAGE_TAG)
 AR_IMAGE           ?= $(DOCKER_REGISTRY)/alert-router:$(IMAGE_TAG)
 TI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ingest:$(IMAGE_TAG)
+DBC_IMAGE          ?= $(DOCKER_REGISTRY)/db-collector:$(IMAGE_TAG)
+CC_IMAGE           ?= $(DOCKER_REGISTRY)/cluster-collector:$(IMAGE_TAG)
+# The node-agent is a fork of Coroot's, kept beside this repository (../fleet-node-agent); its Dockerfile builds it.
+NA_DIR             ?= ../fleet-node-agent
+NA_IMAGE           ?= $(DOCKER_REGISTRY)/node-agent:$(IMAGE_TAG)
 UI_IMAGE           ?= $(DOCKER_REGISTRY)/telemetry-ui:$(IMAGE_TAG)
 ALERTS_IMAGE       ?= $(DOCKER_REGISTRY)/telemetry-alerts:$(IMAGE_TAG)
 
@@ -143,7 +151,7 @@ help:
 	@echo "  make verify-all         Full clean-room: clean → deploy → validate → deploy-cd"
 
 # ── Test ─────────────────────────────────────────────────────────────────────
-.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
+.PHONY: test test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti test-dbc test-dbc-integration test-dbc-pgbouncer test-dbc-e2e build-db-collector-image push-db-collector test-cc test-cc-chart test-cc-e2e test-enroll-e2e build-cluster-collector-image push-cluster-collector build-node-agent-image push-node-agent test-ti-integration test-ti-chart test-telemetry-credentials test-ui test-ui-chart test-ui-image test-telemetry-alerts-chart test-telemetry-alerts-image ui-install ui-dev test-servicemap test-alerts test-alertmanager test-alert-flow test-spoke-probe test-spoke-metrics test-coroot-agents test-node-agent-chart test-race test-cover
 test: test-root test-bc test-wo test-ov test-dap test-vmbc test-vmsg test-ar test-ti
 	@echo "==> All unit tests passed"
 
@@ -173,6 +181,37 @@ test-ar:
 
 test-ti:
 	cd $(TI_DIR) && go test ./... -count=1
+
+# The database collector: unit tests; then against real PostgreSQL servers (13, 16 and 17, needs Docker, ~3 min); then the whole chain with
+# the two images and a ClickHouse (needs Docker, builds images).
+test-dbc:
+	cd $(DBC_DIR) && go test ./... -count=1
+
+test-dbc-integration:
+	./hack/platform-mvp/test-db-collector.sh
+
+# The PgBouncer engine against real PgBouncers (1.22 and the latest) in transaction mode with a pool of 2 (needs Docker, ~2 min).
+test-dbc-pgbouncer:
+	./hack/platform-mvp/test-db-collector-pgbouncer.sh
+
+test-dbc-e2e:
+	./hack/platform-mvp/test-db-collector-e2e.sh
+
+# The cluster collector (what is in a cluster, reported to the hub): unit tests with the race detector (needs Docker); the spoke chart's
+# template (Docker and network); then against a real Kubernetes API server (k3s), the ingest image and a ClickHouse (Docker, builds images, ~5 min).
+test-cc:
+	./hack/platform-mvp/test-cluster-collector.sh
+
+test-cc-chart:
+	./hack/platform-mvp/test-cluster-collector-chart.sh
+
+test-cc-e2e:
+	./hack/platform-mvp/test-cluster-collector-e2e.sh
+
+# Enrolling a cluster: the command the UI makes, run against a real API server (k3s), then the cluster collector reporting with the key it made
+# (needs Docker, builds two images, ~5 min). See docs/platform-mvp/24-enrollment.md.
+test-enroll-e2e:
+	./hack/platform-mvp/test-enroll-e2e.sh
 
 # Against a real ClickHouse started for the run (needs Docker, ~1 min).
 test-ti-integration:
@@ -372,16 +411,72 @@ build-alert-router-image:
 	docker build -t $(AR_IMAGE) $(AR_DIR)
 
 build-telemetry-ingest-image:
+	$(need-image-name)
 	@echo "==> Building $(TI_IMAGE)"
 	docker build -t $(TI_IMAGE) $(TI_DIR)
 
+# Not part of build-images either: the database collector runs near the databases it reads, not on the hub.
+build-db-collector-image:
+	$(need-image-name)
+	@echo "==> Building $(DBC_IMAGE)"
+	docker build -t $(DBC_IMAGE) $(DBC_DIR)
+
+push-db-collector:
+	$(need-image-name)
+	docker push $(DBC_IMAGE)
+
+# Not part of build-images either: the cluster collector runs in each spoke cluster, beside the node-agent, and has its own image.
+build-cluster-collector-image:
+	$(need-image-name)
+	@echo "==> Building $(CC_IMAGE)"
+	docker build -t $(CC_IMAGE) $(CC_DIR)
+
+push-cluster-collector:
+	$(need-image-name)
+	docker push $(CC_IMAGE)
+
+# The node-agent image, from the fork at NA_DIR (the build needs eBPF headers and takes a few minutes). Use it in the spoke chart with
+# nodeAgent.image.repository=$(DOCKER_REGISTRY)/node-agent and nodeAgent.image.tag=$(IMAGE_TAG).
+build-node-agent-image:
+	$(need-image-name)
+	@test -f "$(NA_DIR)/Dockerfile" || { echo "no node-agent source at $(NA_DIR): set NA_DIR"; exit 1; }
+	@echo "==> Building $(NA_IMAGE)"
+	docker build -t $(NA_IMAGE) --build-arg VERSION=$(IMAGE_TAG) $(NA_DIR)
+
+push-node-agent:
+	$(need-image-name)
+	docker push $(NA_IMAGE)
+
 # Not part of build-images: the UI and the alert service are opt-in, like the service they read.
+# An empty DOCKER_REGISTRY or IMAGE_TAG (an unset shell variable passed on the command line, as in DOCKER_REGISTRY=$REG) would
+# make the image name "/telemetry-ui:", which Docker rejects with a message that does not say why. Say it here instead.
+need-image-name = $(if $(and $(strip $(DOCKER_REGISTRY)),$(strip $(IMAGE_TAG))),,$(error DOCKER_REGISTRY and IMAGE_TAG must not be empty (got "$(DOCKER_REGISTRY)" and "$(IMAGE_TAG)"): is the shell variable you passed set? try `echo $$REG`))
+.PHONY: deploy-telemetry-ingest release-telemetry-ingest
+# Points the running telemetry-ingest Deployment at TI_IMAGE and waits for the rollout. Deliberately not a helm upgrade: that would
+# regenerate the chart's key Secrets. Chart value changes (e.g. exposeClusterInfo) go through `helm template -s templates/telemetry-ingest.yaml`.
+# KUBE_CONTEXT picks the cluster (default: the current context); TI_NAMESPACE where it runs.
+TI_NAMESPACE ?= monitoring
+KUBE_CONTEXT ?=
+deploy-telemetry-ingest:
+	$(need-image-name)
+	kubectl $(if $(KUBE_CONTEXT),--context $(KUBE_CONTEXT)) -n $(TI_NAMESPACE) set image deployment/telemetry-ingest telemetry-ingest=$(TI_IMAGE)
+	kubectl $(if $(KUBE_CONTEXT),--context $(KUBE_CONTEXT)) -n $(TI_NAMESPACE) rollout status deployment/telemetry-ingest --timeout=3m
+
+# Build, push and deploy in one go. Use a new IMAGE_TAG each time so the pods are replaced: make release-telemetry-ingest DOCKER_REGISTRY=... IMAGE_TAG=v2
+release-telemetry-ingest: build-telemetry-ingest-image push-telemetry-ingest deploy-telemetry-ingest
+
 .PHONY: build-telemetry-ui-image push-telemetry-ui build-telemetry-alerts-image push-telemetry-alerts
+# The UI image says which build it is (the tag, the commit it came from, when), in the sidebar and at /version.json. A working tree with changes
+# in it is marked -dirty, and outside a git checkout there is no commit to name. Any of the three can be given on the command line.
+UI_BUILT  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+UI_COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)$(shell git rev-parse HEAD >/dev/null 2>&1 && ! git diff --quiet HEAD 2>/dev/null && echo -dirty)
 build-telemetry-ui-image:
-	@echo "==> Building $(UI_IMAGE)"
-	docker build -t $(UI_IMAGE) $(UI_DIR)
+	$(need-image-name)
+	@echo "==> Building $(UI_IMAGE) (version $(IMAGE_TAG), commit '$(UI_COMMIT)', built $(UI_BUILT))"
+	docker build -t $(UI_IMAGE) --build-arg APP_VERSION=$(IMAGE_TAG) --build-arg APP_COMMIT=$(UI_COMMIT) --build-arg APP_BUILT=$(UI_BUILT) $(UI_DIR)
 
 build-telemetry-alerts-image:
+	$(need-image-name)
 	@echo "==> Building $(ALERTS_IMAGE)"
 	docker build -f $(UI_DIR)/Dockerfile.alerts -t $(ALERTS_IMAGE) $(UI_DIR)
 
@@ -419,10 +514,13 @@ push-vmsg:
 push-alert-router:
 	docker push $(AR_IMAGE)
 push-telemetry-ingest:
+	$(need-image-name)
 	docker push $(TI_IMAGE)
 push-telemetry-ui:
+	$(need-image-name)
 	docker push $(UI_IMAGE)
 push-telemetry-alerts:
+	$(need-image-name)
 	docker push $(ALERTS_IMAGE)
 
 push-images-parallel:
