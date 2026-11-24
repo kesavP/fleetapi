@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -409,6 +410,37 @@ func TestQueryRangeParams(t *testing.T) {
 			t.Errorf("%s: %d, want 400", name, code)
 		}
 	}
+}
+
+func TestMatchersInBothForms(t *testing.T) {
+	fr := &fakeReader{}
+	srv := queryServer(t, fr)
+	u := srv.URL + "/api/v1/projects/us/metrics/query_range?name=up&"
+	if code, body := get(t, u+"match=pod%3Da&match=ns%3Db%3Dc&match.job=x", usRead); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if m := fr.gotMetric.Match; len(m) != 3 || m["pod"] != "a" || m["ns"] != "b=c" || m["job"] != "x" {
+		t.Fatalf("%v", m)
+	}
+	for name, qs := range map[string]string{
+		"no equals":         "match=pod",
+		"no label":          "match=%3Da",
+		"a label twice":     "match=pod%3Da&match=pod%3Db",
+		"in both forms":     "match=pod%3Da&match.pod=b",
+		"too many matchers": manyMatchers(21),
+	} {
+		if code, _ := get(t, u+qs, usRead); code != 400 {
+			t.Errorf("%s: %d, want 400", name, code)
+		}
+	}
+}
+
+func manyMatchers(n int) string {
+	var parts []string
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf("match=l%d%%3Dv", i))
+	}
+	return strings.Join(parts, "&")
 }
 
 func TestSpanAndTraceParams(t *testing.T) {

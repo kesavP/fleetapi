@@ -1,0 +1,7 @@
+{
+  "data": [
+    "container_net_tcp_successful_connects_total",
+    "container_resources_cpu_usage_seconds_total"
+  ]
+}
+

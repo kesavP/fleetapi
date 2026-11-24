@@ -150,15 +150,34 @@ func required(r *http.Request, name string) (string, error) {
 	return v, nil
 }
 
-// matchers reads match.<label>=<value> pairs.
+// matchers reads label matchers, as match.<label>=<value> or as a repeated match=<label>=<value> (the form an API description can state, used
+// by the generated client). A label may be given once, in either form.
 func matchers(r *http.Request) (map[string]string, error) {
 	m := map[string]string{}
+	set := func(label, value string) error {
+		if _, dup := m[label]; dup {
+			return paramError("the label " + label + " may be matched once")
+		}
+		m[label] = value
+		return nil
+	}
 	for k, vs := range r.URL.Query() {
 		if label, ok := strings.CutPrefix(k, "match."); ok && label != "" {
 			if len(vs) != 1 {
 				return nil, paramError(k + " may be given once")
 			}
-			m[label] = vs[0]
+			if err := set(label, vs[0]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, kv := range r.URL.Query()["match"] {
+		label, value, ok := strings.Cut(kv, "=")
+		if !ok || label == "" {
+			return nil, paramError(fmt.Sprintf("match must be label=value, not %q", kv))
+		}
+		if err := set(label, value); err != nil {
+			return nil, err
 		}
 	}
 	if len(m) > maxMatchers {

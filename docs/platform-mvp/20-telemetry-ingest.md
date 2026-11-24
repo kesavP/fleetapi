@@ -836,3 +836,16 @@ A source that fails is named in the gaps and the rest is answered. The Claude an
 
 To turn process lineage on in a spoke, run fleet-node-agent (`nodeAgent.image.repository`) with
 `--set 'nodeAgent.extraArgs={--process-lineage}'`; its records go through the agent's logs, so the spoke must be sending logs to the hub.
+
+## The read API's description, client and Claude skill
+
+The logs, traces and metrics read API is described in `platform-mvp/telemetry-client/api/swagger.json` (Swagger 2.0). The module there holds
+the Go client generated from it (go-swagger), a thin wrapper (`fleet.New(hub, project, readKey)`) and `fleetctl`, a command-line tool; see its
+README. `server/apispec_test.go` checks that the server answers every operation the description has and that every logs/traces/metrics route
+is described, and writes the answers as the client's test fixtures (`-update-fixtures`). Metric label matchers can also be given as a repeated
+`match=<label>=<value>`, the form the description uses; `match.<label>=<value>` keeps working.
+
+The Claude Code skill `.claude/skills/fleet-telemetry` lets Claude answer questions about the data ("what errors did checkout log in the
+last hour?") by running `fleetctl` with a project's read key from `FLEET_READ_KEY_FILE`; it never sees or prints the key. The skill only
+reads, but it applies only when it is used: what else Claude may run in a session is up to Claude Code's permission settings, so keep
+cluster-changing commands (kubectl, helm) behind a prompt there.
